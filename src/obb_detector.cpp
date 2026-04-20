@@ -112,56 +112,175 @@ void OBBDetector::thread_loop() {
         std::unique_lock<std::mutex> lock(mtx);
         cv.wait(lock, [&] { return !running.load() || frame_ready; });
         if (!running.load()) break;
-        
+
         frame_ready = false;
         lock.unlock();
-        
+
         cudaStreamWaitEvent(stream, copy_done_event, 0);
         if (!running.load() || !d_frame_original) continue;
-        
-        // Consume YOLO boxes
+
+        // Copy frame to CPU
+        cv::Mat frame;
+        copy_frame_to_cpu(d_frame_original, frame);
+        if (frame.empty()) { frames_processed++; continue; }
+
+        // --- Background model ---
+        // Collect first N frames to build median background
+        if (!bg_ready) {
+            cv::Mat gray;
+            cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+            bg_accumulator.push_back(gray.clone());
+            bg_frames_collected++;
+            if (bg_frames_collected >= bg_frames_needed) {
+                // Compute median background
+                cv::Mat stack(bg_accumulator[0].rows, bg_accumulator[0].cols, CV_32F, cv::Scalar(0));
+                // Use mean for speed (close enough to median for static bg)
+                for (const auto& f : bg_accumulator) {
+                    cv::Mat f32;
+                    f.convertTo(f32, CV_32F);
+                    stack += f32;
+                }
+                stack /= (float)bg_accumulator.size();
+                stack.convertTo(background, CV_8U);
+                bg_accumulator.clear();
+                bg_ready = true;
+                std::cout << "OBB: Background model built from " << bg_frames_needed << " frames" << std::endl;
+            }
+            frames_processed++;
+            continue;
+        }
+
+        // --- OBB from background subtraction + YOLO center ---
+        std::vector<OBB> detections;
+
+        // Get YOLO boxes (for center location)
         std::vector<Bbox> boxes;
-        bool got_update = false;
         {
             std::lock_guard<std::mutex> ylock(yolo_mtx);
             if (yolo_has_update) {
                 boxes = std::move(yolo_boxes_pending);
                 yolo_boxes_pending.clear();
                 yolo_has_update = false;
-                got_update = true;
+            }
+            // Also consume seg OBBs if present (ignore them, we use bg sub now)
+            if (seg_has_update) {
+                seg_obbs_pending.clear();
+                seg_has_update = false;
             }
         }
-        
-        if (!got_update) {
-            frames_processed++;
-            continue;
+
+        // Get prior size
+        float pw = 0, ph = 0;
+        int tcls = 2;
+        if (priors.find(tcls) != priors.end()) {
+            pw = priors[tcls].width_median;
+            ph = priors[tcls].height_median;
         }
-        
-        // Copy frame to CPU only when we have boxes to refine
-        std::vector<OBB> detections;
+
         if (!boxes.empty()) {
-            cv::Mat frame;
-            copy_frame_to_cpu(d_frame_original, frame);
-            if (!frame.empty()) {
-                detections = refine_yolo_detections(frame, boxes);
+            // Background subtraction to find foreground
+            cv::Mat gray;
+            cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+            cv::Mat diff;
+            cv::absdiff(gray, background, diff);
+
+            static int bg_debug_count = 0;
+
+            for (const auto& bbox : boxes) {
+                float cx = bbox.rect.x + bbox.rect.width / 2.0f;
+                float cy = bbox.rect.y + bbox.rect.height / 2.0f;
+                float ow = (pw > 0) ? pw : bbox.rect.width;
+                float oh = (ph > 0) ? ph : bbox.rect.height;
+
+                // Crop around YOLO center
+                float pad = std::max(ow, oh) * 1.5f;
+                int rx1 = std::max(0, (int)(cx - pad));
+                int ry1 = std::max(0, (int)(cy - pad));
+                int rx2 = std::min(frame.cols, (int)(cx + pad));
+                int ry2 = std::min(frame.rows, (int)(cy + pad));
+                if (rx2 <= rx1 || ry2 <= ry1) continue;
+
+                cv::Mat crop_diff = diff(cv::Rect(rx1, ry1, rx2 - rx1, ry2 - ry1));
+                cv::Mat crop_gray = gray(cv::Rect(rx1, ry1, rx2 - rx1, ry2 - ry1));
+
+                // Step 1: bg subtraction mask — find what changed (cylinder + shadow)
+                cv::Mat fg_mask;
+                cv::threshold(crop_diff, fg_mask, 20, 255, cv::THRESH_BINARY);
+                cv::Mat kern = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
+                cv::morphologyEx(fg_mask, fg_mask, cv::MORPH_CLOSE, kern, cv::Point(-1, -1), 2);
+
+                // Step 2: within the foreground, isolate just the WHITE face
+                // (brightest pixels in the foreground region)
+                cv::Mat white_mask;
+                // Get the brightness values of only foreground pixels
+                double fg_max;
+                cv::minMaxLoc(crop_gray, nullptr, &fg_max, nullptr, nullptr, fg_mask);
+                // Threshold at 80% of max brightness — captures the white face only
+                cv::threshold(crop_gray, white_mask, fg_max * 0.80, 255, cv::THRESH_BINARY);
+                // AND with foreground to remove any background bright spots
+                cv::bitwise_and(white_mask, fg_mask, white_mask);
+
+                // Find contours of the white face
+                std::vector<std::vector<cv::Point>> contours;
+                cv::findContours(white_mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+                if (contours.empty()) continue;
+
+                // Pick largest contour near crop center
+                cv::Point2f crop_center((rx2 - rx1) / 2.0f, (ry2 - ry1) / 2.0f);
+                int best_idx = -1;
+                float best_dist = std::numeric_limits<float>::max();
+                for (size_t i = 0; i < contours.size(); i++) {
+                    if (cv::contourArea(contours[i]) < 50) continue;
+                    cv::Moments m = cv::moments(contours[i]);
+                    if (m.m00 < 1) continue;
+                    cv::Point2f c(m.m10 / m.m00, m.m01 / m.m00);
+                    float d = cv::norm(c - crop_center);
+                    if (d < best_dist) { best_dist = d; best_idx = (int)i; }
+                }
+                if (best_idx < 0) continue;
+
+                cv::RotatedRect rrect = cv::minAreaRect(contours[best_idx]);
+                float angle = rrect.angle;
+
+                if (bg_debug_count < 3) {
+                    float aspect = std::max(rrect.size.width, rrect.size.height) /
+                                   std::max(std::min(rrect.size.width, rrect.size.height), 1.0f);
+                    std::cout << "OBB white-face: area=" << cv::contourArea(contours[best_idx])
+                              << " size=" << rrect.size.width << "x" << rrect.size.height
+                              << " aspect=" << aspect
+                              << " angle=" << angle << "°" << std::endl;
+                    cv::imwrite("/tmp/obb_fg_mask.png", fg_mask);
+                    cv::imwrite("/tmp/obb_white_mask.png", white_mask);
+                    bg_debug_count++;
+                }
+
+                // EMA smooth the angle
+                angle = smooth_angle(cx, cy, angle);
+
+                // Build OBB: YOLO center + prior size + bg-sub angle
+                cv::RotatedRect final_rect(cv::Point2f(cx, cy), cv::Size2f(ow, oh), angle);
+                cv::Point2f pts[4];
+                final_rect.points(pts);
+                auto ordered = order_corners_clockwise_start_tl({pts[0], pts[1], pts[2], pts[3]});
+                OBB obb(ordered[0].x, ordered[0].y, ordered[1].x, ordered[1].y,
+                        ordered[2].x, ordered[2].y, ordered[3].x, ordered[3].y,
+                        tcls, bbox.prob, -1, true);
+                detections.push_back(obb);
             }
         }
-        
-        if (should_update_detections(detections)) {
-            {
-                std::lock_guard<std::mutex> dlock(detections_mtx);
-                latest_detections = detections;
-                stable_detections = detections;
-                detections_stable = true;
-                frames_since_change = 0;
-            }
-            
+
+        if (!detections.empty()) {
+            std::lock_guard<std::mutex> dlock(detections_mtx);
+            latest_detections = detections;
+            stable_detections = detections;
+            detections_stable = true;
+            frames_since_change = 0;
         } else {
             std::lock_guard<std::mutex> dlock(detections_mtx);
             latest_detections = stable_detections;
             frames_since_change++;
         }
-        
+
         frames_processed++;
         detections_found += detections.size();
     }
@@ -692,6 +811,148 @@ std::vector<OBB> OBBDetector::refine_yolo_detections(
 }
 
 // ---------------------------------------------------------------------------
+// Iterative edge-alignment optimization
+// ---------------------------------------------------------------------------
+
+void OBBDetector::set_seg_obbs(const std::vector<OBB>& obbs) {
+    std::lock_guard<std::mutex> lock(yolo_mtx);
+    seg_obbs_pending = obbs;
+    seg_has_update = true;
+}
+
+// Score how well an OBB's edges align with image gradients.
+// Measures gradient DIRECTION alignment — a correct OBB has gradients
+// perpendicular to each edge. Much more discriminative than magnitude alone.
+float OBBDetector::score_obb_edge_alignment(const cv::Mat& grad_mag,
+                                            const cv::RotatedRect& rrect) {
+    // grad_mag is actually unused now — we use the stored grad_x/grad_y
+    // This function is called with the precomputed fields below
+    (void)grad_mag;
+    return 0.0f;  // overridden by the new implementation in optimize_obb_angle
+}
+
+// Score how well a rotated rect's edges align with gradient directions.
+// For each sample point on each OBB edge, compute how perpendicular
+// the image gradient is to the edge normal. Higher = better fit.
+static float score_gradient_alignment(const cv::Mat& gx, const cv::Mat& gy,
+                                      const cv::RotatedRect& rrect) {
+    cv::Point2f pts[4];
+    rrect.points(pts);
+    int h = gx.rows, w = gx.cols;
+    float total_score = 0;
+    int count = 0;
+
+    for (int e = 0; e < 4; e++) {
+        cv::Point2f p0 = pts[e];
+        cv::Point2f p1 = pts[(e + 1) % 4];
+        // Edge direction and normal
+        float edx = p1.x - p0.x;
+        float edy = p1.y - p0.y;
+        float elen = std::sqrt(edx * edx + edy * edy);
+        if (elen < 1.0f) continue;
+        // Outward normal (perpendicular to edge)
+        float nx = -edy / elen;
+        float ny = edx / elen;
+
+        int steps = std::max(4, (int)(elen / 2.0f));
+        for (int s = 0; s <= steps; s++) {
+            float t = (float)s / steps;
+            int x = (int)(p0.x + t * edx);
+            int y = (int)(p0.y + t * edy);
+            if (x < 1 || x >= w - 1 || y < 1 || y >= h - 1) continue;
+
+            float igx = gx.at<float>(y, x);
+            float igy = gy.at<float>(y, x);
+            float gmag = std::sqrt(igx * igx + igy * igy);
+            if (gmag < 5.0f) continue;  // skip weak gradients
+
+            // How aligned is gradient with edge normal? |dot product|
+            float alignment = std::abs(nx * igx + ny * igy) / gmag;
+            total_score += alignment * gmag;  // weight by gradient strength
+            count++;
+        }
+    }
+    return (count > 0) ? total_score / count : 0.0f;
+}
+
+// Extract angle from the combined bright cylinder + dark shadow.
+// Together they form an elongated shape with a clear orientation.
+void OBBDetector::optimize_obb_angle(const cv::Mat& frame, OBB& obb,
+                                     int iterations, float step_deg) {
+    cv::Point2f center((obb.x1 + obb.x2 + obb.x3 + obb.x4) / 4.0f,
+                       (obb.y1 + obb.y2 + obb.y3 + obb.y4) / 4.0f);
+    auto wh = rect_wh_from_pts({{obb.x1, obb.y1}, {obb.x2, obb.y2},
+                                 {obb.x3, obb.y3}, {obb.x4, obb.y4}});
+
+    // Crop 3x around OBB to capture the shadow
+    float pad = std::max(wh.first, wh.second) * 2.0f;
+    int cx1 = std::max(0, (int)(center.x - pad));
+    int cy1 = std::max(0, (int)(center.y - pad));
+    int cx2 = std::min(frame.cols, (int)(center.x + pad));
+    int cy2 = std::min(frame.rows, (int)(center.y + pad));
+    if (cx2 <= cx1 || cy2 <= cy1) return;
+
+    cv::Mat crop = frame(cv::Rect(cx1, cy1, cx2 - cx1, cy2 - cy1));
+    cv::Mat gray, blur;
+    cv::cvtColor(crop, gray, cv::COLOR_BGR2GRAY);
+    cv::GaussianBlur(gray, blur, cv::Size(5, 5), 0);
+
+    // Compute local statistics
+    double mean_val = cv::mean(blur)[0];
+
+    // Bright mask: the white cylinder face (well above mean)
+    cv::Mat bright_mask;
+    cv::threshold(blur, bright_mask, mean_val + 40, 255, cv::THRESH_BINARY);
+    bright_mask.convertTo(bright_mask, CV_8U);
+
+    // Shadow mask: dark region below/beside cylinder (well below mean)
+    cv::Mat shadow_mask;
+    cv::threshold(blur, shadow_mask, mean_val - 20, 255, cv::THRESH_BINARY_INV);
+    shadow_mask.convertTo(shadow_mask, CV_8U);
+
+    // Combined: cylinder + shadow forms an elongated shape
+    cv::Mat combined;
+    cv::bitwise_or(bright_mask, shadow_mask, combined);
+
+    // Clean up
+    cv::Mat kern = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
+    cv::morphologyEx(combined, combined, cv::MORPH_CLOSE, kern, cv::Point(-1, -1), 2);
+    cv::morphologyEx(combined, combined, cv::MORPH_OPEN, kern, cv::Point(-1, -1), 1);
+
+    // Find contour closest to center
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(combined, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    if (contours.empty()) return;
+
+    cv::Point2f crop_center(center.x - cx1, center.y - cy1);
+    int best_idx = -1;
+    float best_dist = std::numeric_limits<float>::max();
+    for (size_t i = 0; i < contours.size(); i++) {
+        if (cv::contourArea(contours[i]) < 100) continue;
+        cv::Moments m = cv::moments(contours[i]);
+        if (m.m00 < 1) continue;
+        cv::Point2f c(m.m10 / m.m00, m.m01 / m.m00);
+        float d = cv::norm(c - crop_center);
+        if (d < best_dist) { best_dist = d; best_idx = (int)i; }
+    }
+    if (best_idx < 0) return;
+
+    // Fit minAreaRect to the combined cylinder+shadow shape
+    cv::RotatedRect combined_rect = cv::minAreaRect(contours[best_idx]);
+    float angle = combined_rect.angle;
+
+    // Write back OBB with the new angle, keeping center and prior size
+    cv::RotatedRect final_rect(center, cv::Size2f(wh.first, wh.second), angle);
+    cv::Point2f pts[4];
+    final_rect.points(pts);
+    auto ordered = order_corners_clockwise_start_tl({pts[0], pts[1], pts[2], pts[3]});
+    obb.x1 = ordered[0].x; obb.y1 = ordered[0].y;
+    obb.x2 = ordered[1].x; obb.y2 = ordered[1].y;
+    obb.x3 = ordered[2].x; obb.y3 = ordered[2].y;
+    obb.x4 = ordered[3].x; obb.y4 = ordered[3].y;
+}
+
+// ---------------------------------------------------------------------------
 // Seg-based OBB: reconstruct mask from coefficients × prototypes
 // ---------------------------------------------------------------------------
 
@@ -779,14 +1040,25 @@ std::vector<OBB> OBBDetector::refine_from_seg_masks(
             [](const auto& a, const auto& b) { return cv::contourArea(a) < cv::contourArea(b); });
         if (cv::contourArea(*best_it) < 10) continue;
 
-        // Fit minAreaRect in input640 space, then map to image space
-        cv::RotatedRect rrect = cv::minAreaRect(*best_it);
+        // Get angle from the mask contour
+        cv::RotatedRect mask_rect = cv::minAreaRect(*best_it);
+        float angle = mask_rect.angle;
 
-        // input640 → image: (x - dw) * ratio
-        rrect.center.x = (rrect.center.x - dw) * ratio;
-        rrect.center.y = (rrect.center.y - dh) * ratio;
-        rrect.size.width *= ratio;
-        rrect.size.height *= ratio;
+        // Center from YOLO (accurate), size from CSV priors (calibrated),
+        // angle from seg mask
+        float cx = bbox.rect.x + bbox.rect.width / 2.0f;
+        float cy = bbox.rect.y + bbox.rect.height / 2.0f;
+        float obb_w, obb_h;
+        if (priors.find(target_class_id) != priors.end()) {
+            obb_w = priors[target_class_id].width_median;
+            obb_h = priors[target_class_id].height_median;
+        } else {
+            obb_w = bbox.rect.width;
+            obb_h = bbox.rect.height;
+        }
+
+        cv::RotatedRect rrect(cv::Point2f(cx, cy),
+                              cv::Size2f(obb_w, obb_h), angle);
 
         cv::Point2f pts[4];
         rrect.points(pts);

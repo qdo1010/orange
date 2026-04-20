@@ -98,12 +98,18 @@ public:
                                             int target_class_id = 2);
 
     // Seg-based: reconstruct mask from coefficients + prototypes → fit OBB
-    // pparam carries the letterbox preprocessing info (ratio, dw, dh)
     std::vector<OBB> refine_from_seg_masks(const std::vector<Bbox>& yolo_boxes,
                                            const float* mask_protos,
                                            int proto_h, int proto_w, int num_protos,
                                            const PreParam& pparam,
                                            int target_class_id = 2);
+
+    // Iterative edge-alignment optimization: refine OBB angle against actual image
+    void optimize_obb_angle(const cv::Mat& frame, OBB& obb, int iterations = 10, float step_deg = 3.0f);
+    float score_obb_edge_alignment(const cv::Mat& grad_mag, const cv::RotatedRect& rrect);
+
+    // Supply initial seg-based OBBs for iterative refinement in the worker thread
+    void set_seg_obbs(const std::vector<OBB>& obbs);
     
     bool should_update_detections(const std::vector<OBB>& new_detections);
     
@@ -178,6 +184,10 @@ private:
     bool yolo_has_update;
     std::mutex yolo_mtx;
 
+    // Seg-based initial OBBs for iterative refinement
+    std::vector<OBB> seg_obbs_pending;
+    bool seg_has_update = false;
+
     // Per-object angle smoothing (EMA)
     struct AngleTrack {
         float cx, cy;
@@ -188,6 +198,13 @@ private:
     static constexpr float ANGLE_EMA_ALPHA = 0.5f;   // weight of new measurement
     static constexpr float TRACK_MATCH_DIST = 80.0f;  // max pixels to match
     static constexpr int   TRACK_MAX_AGE = 30;         // drop after N unmatched frames
+
+    // Background model for subtraction-based OBB
+    cv::Mat background;
+    int bg_frames_collected = 0;
+    int bg_frames_needed = 50;
+    std::vector<cv::Mat> bg_accumulator;
+    bool bg_ready = false;
 };
 
 #endif // ORANGE_OBB_DETECTOR

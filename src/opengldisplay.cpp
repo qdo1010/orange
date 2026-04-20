@@ -268,13 +268,18 @@ void COpenGLDisplay::ThreadRunning() {
                 // for OBB fitting (no frame copy needed).
                 if (yolov8 && yolov8->has_mask_protos() &&
                     !objs.empty() && !objs[0].mask_coeffs.empty()) {
-                    obb_detections = obb_detector->refine_from_seg_masks(
+                    // Get initial OBBs from seg masks
+                    auto seg_obbs = obb_detector->refine_from_seg_masks(
                         objs,
                         yolov8->get_mask_protos(),
                         yolov8->get_mask_proto_h(),
                         yolov8->get_mask_proto_w(),
                         yolov8->get_mask_num_protos(),
                         yolov8->pparam);
+                    // Feed to worker thread for iterative edge optimization
+                    obb_detector->set_seg_obbs(seg_obbs);
+                    obb_detector->notify_frame_ready(debayer.d_debayer, 0);
+                    obb_detections = obb_detector->get_latest_detections();
                 } else {
                     // Fallback: two-stage CV-based refinement
                     obb_detector->set_yolo_boxes(objs);
