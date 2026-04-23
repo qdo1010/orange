@@ -269,16 +269,16 @@ void OBBDetector::thread_loop() {
             }
         }
 
-        if (!detections.empty()) {
+        {
             std::lock_guard<std::mutex> dlock(detections_mtx);
             latest_detections = detections;
-            stable_detections = detections;
-            detections_stable = true;
-            frames_since_change = 0;
-        } else {
-            std::lock_guard<std::mutex> dlock(detections_mtx);
-            latest_detections = stable_detections;
-            frames_since_change++;
+            if (!detections.empty()) {
+                stable_detections = detections;
+                detections_stable = true;
+                frames_since_change = 0;
+            } else {
+                frames_since_change++;
+            }
         }
 
         frames_processed++;
