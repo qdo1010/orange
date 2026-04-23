@@ -264,11 +264,17 @@ void COpenGLDisplay::ThreadRunning() {
             if (obb_overlay_enabled) {
                 std::vector<OBB> obb_detections;
 
-                // If the YOLO model provides seg masks, use them directly
-                // for OBB fitting (no frame copy needed).
-                if (yolov8 && yolov8->has_mask_protos() &&
-                    !objs.empty() && !objs[0].mask_coeffs.empty()) {
-                    // Get initial OBBs from seg masks
+                if (objs.empty()) {
+                    // No YOLO detection this frame — no OBBs. Keep the worker
+                    // in sync (so it won't return stale data on the next
+                    // frame that does have a detection) but don't consult it
+                    // now; get_latest_detections() races the worker and
+                    // would return the previous frame's box.
+                    obb_detector->set_yolo_boxes(objs);
+                } else if (yolov8 && yolov8->has_mask_protos() &&
+                           !objs[0].mask_coeffs.empty()) {
+                    // Seg-mask path: compute initial OBBs, hand to worker
+                    // for iterative edge optimization.
                     auto seg_obbs = obb_detector->refine_from_seg_masks(
                         objs,
                         yolov8->get_mask_protos(),
@@ -276,7 +282,6 @@ void COpenGLDisplay::ThreadRunning() {
                         yolov8->get_mask_proto_w(),
                         yolov8->get_mask_num_protos(),
                         yolov8->pparam);
-                    // Feed to worker thread for iterative edge optimization
                     obb_detector->set_seg_obbs(seg_obbs);
                     obb_detector->notify_frame_ready(debayer.d_debayer, 0);
                     obb_detections = obb_detector->get_latest_detections();
