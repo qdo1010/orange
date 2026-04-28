@@ -133,6 +133,7 @@ target_link_libraries(orange
     EmergentCamera
     EmergentGenICam
     EmergentGigEVision
+    LabJackM
     avformat
     swscale
     swresample

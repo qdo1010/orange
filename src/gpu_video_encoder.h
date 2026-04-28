@@ -34,7 +34,9 @@ class GPUVideoEncoder : public CThreadWorker {
 
     bool PushToDisplay(void *imagePtr, size_t bufferSize, int width, int height,
                        int pixelFormat, unsigned long long timestamp,
-                       unsigned long long frame_id, uint64_t timestamp_sys);
+                       unsigned long long frame_id, uint64_t timestamp_sys,
+                       uint64_t lj_edge_index = 0,
+                       uint64_t lj_edge_timestamp_ns = 0);
     void ProcessOneFrame(void *f);
 
     // open gl dimensions:

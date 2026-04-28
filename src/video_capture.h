@@ -6,6 +6,8 @@
 #include <mutex>
 #include <vector>
 
+class LabJackTrigger;
+
 enum PictureState {
     State_Frame_Idle,
     State_Copy_New_Frame,
@@ -33,6 +35,12 @@ struct CameraControl {
     bool record_video = false;
     bool sync_camera = false;
     bool trigger_mode = false;
+    bool lj_trigger_mode = false;
+    LabJackTrigger *lj_trigger = nullptr;
+    // Number of IR frames the camera bursts per LJ edge. 1 = strict 1:1 sync
+    // (IR rate matches microscope, exposure inside flyback). 2/4 = 1:2/1:4
+    // (IR rate = N×microscope rate, frames 2..N land mid-scan).
+    int lj_frames_per_edge = 1;
     std::atomic<int> focus_test_generation{0};
     SetFocusRequest setfocus;
 };

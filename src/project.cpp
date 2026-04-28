@@ -509,12 +509,33 @@ void client_send_state_update_message(EnetContext *enet_context,
 
 void host_broadcast_open_cameras(flatbuffers::FlatBufferBuilder *builder,
                                  EnetContext *server,
-                                 std::string config_file_name) {
+                                 std::string config_file_name,
+                                 bool lj_trigger_mode,
+                                 int lj_frames_per_edge) {
     builder->Clear();
     auto config_message = builder->CreateString(config_file_name);
     FetchGame::ServerBuilder server_builder(*builder);
     server_builder.add_config_folder(config_message);
     server_builder.add_control(FetchGame::ServerControl_OPENCAMERA);
+    server_builder.add_lj_trigger_mode(lj_trigger_mode);
+    server_builder.add_lj_frames_per_edge(lj_frames_per_edge);
+    auto my_server = server_builder.Finish();
+    builder->Finish(my_server);
+    uint8_t *server_buffer = builder->GetBufferPointer();
+    int server_buf_size = builder->GetSize();
+    ENetPacket *enet_packet =
+        enet_packet_create(server_buffer, server_buf_size, 0);
+    enet_host_broadcast(server->m_pNetwork, 0, enet_packet);
+}
+
+void host_broadcast_lj_edge(flatbuffers::FlatBufferBuilder *builder,
+                            EnetContext *server, uint64_t edge_index,
+                            uint64_t edge_timestamp_ns) {
+    builder->Clear();
+    FetchGame::ServerBuilder server_builder(*builder);
+    server_builder.add_control(FetchGame::ServerControl_LJEDGE);
+    server_builder.add_lj_edge_index(edge_index);
+    server_builder.add_lj_edge_timestamp_ns(edge_timestamp_ns);
     auto my_server = server_builder.Finish();
     builder->Finish(my_server);
     uint8_t *server_buffer = builder->GetBufferPointer();

@@ -49,15 +49,18 @@ static inline void open_metadata_file(std::ofstream *frame_metadata,
         std::cout << "File did not open!";
         return;
     }
-    *frame_metadata << "frame_id,timestamp,timestamp_sys\n";
+    *frame_metadata
+        << "frame_id,timestamp,timestamp_sys,lj_edge_index,lj_edge_timestamp_ns\n";
 }
 
 static inline void write_metadata(std::ofstream *metadata,
                                   unsigned long long frame_id,
                                   unsigned long long timestamp,
-                                  uint64_t timestamp_sys) {
-    *metadata << frame_id << "," << timestamp << "," << timestamp_sys
-              << std::endl;
+                                  uint64_t timestamp_sys,
+                                  uint64_t lj_edge_index,
+                                  uint64_t lj_edge_timestamp_ns) {
+    *metadata << frame_id << "," << timestamp << "," << timestamp_sys << ","
+              << lj_edge_index << "," << lj_edge_timestamp_ns << std::endl;
 }
 
 static inline void initialize_writer(Writer *writer,
@@ -157,7 +160,8 @@ void GPUVideoEncoder::ProcessOneFrame(void *f) {
 
     encode_frame(&encoder, writer.video, &debayer);
     write_metadata(writer.metadata, entry.frame_id, entry.timestamp,
-                   entry.timestamp_sys);
+                   entry.timestamp_sys, entry.lj_edge_index,
+                   entry.lj_edge_timestamp_ns);
 }
 
 void GPUVideoEncoder::ThreadRunning() {
@@ -204,7 +208,9 @@ bool GPUVideoEncoder::PushToDisplay(void *imagePtr, size_t bufferSize,
                                     int width, int height, int pixelFormat,
                                     unsigned long long timestamp,
                                     unsigned long long frame_id,
-                                    uint64_t timestamp_sys) {
+                                    uint64_t timestamp_sys,
+                                    uint64_t lj_edge_index,
+                                    uint64_t lj_edge_timestamp_ns) {
     WORKER_ENTRY
     *entriesOut[ENCODER_ENTRIES_MAX]; // entris got out from saver thread,
                                       // their frames should be returned to
@@ -239,6 +245,8 @@ bool GPUVideoEncoder::PushToDisplay(void *imagePtr, size_t bufferSize,
         entry->timestamp = timestamp;
         entry->frame_id = frame_id;
         entry->timestamp_sys = timestamp_sys;
+        entry->lj_edge_index = lj_edge_index;
+        entry->lj_edge_timestamp_ns = lj_edge_timestamp_ns;
         PutObjectToQueueIn(entry);
         return true;
     }

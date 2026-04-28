@@ -121,6 +121,8 @@ void update_camera_params(Emergent::CEmergentCamera *camera,
                           CameraParams *camera_params);
 void camera_trigger_mode(Emergent::CEmergentCamera *camera,
                          CameraParams *camera_params);
+void camera_setup_lj_trigger(Emergent::CEmergentCamera *camera,
+                             CameraParams *camera_params);
 void allocate_frame_buffer(Emergent::CEmergentCamera *camera,
                            Emergent::CEmergentFrame *evt_frame,
                            CameraParams *camera_params, int buffer_size);
@@ -130,7 +132,7 @@ void destroy_frame_buffer(Emergent::CEmergentCamera *camera,
                           Emergent::CEmergentFrame *evt_frame, int buffer_size,
                           CameraParams *camera_params);
 void ptp_camera_sync(Emergent::CEmergentCamera *camera,
-                     CameraParams *camera_params);
+                     CameraParams *camera_params, int frames_per_edge = 1);
 void ptp_sync_off(Emergent::CEmergentCamera *camera,
                   CameraParams *camera_params);
 void quick_print_camera(GigEVisionDeviceInfo *device_info, int camera_idx);

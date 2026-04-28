@@ -5,11 +5,13 @@
 #include "gui.h"
 #include "imgui.h"
 #include "implot.h"
+#include "labjack_trigger.h"
 #include "network_base.h"
 #include "project.h"
 #include "realtime_tool.h"
 #include "video_capture.h"
 #include <ImGuiFileDialog.h>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -37,6 +39,11 @@ static std::vector<RemoteCamInfo> g_remote_cams;
 #define display_gpu_id 0
 
 int main(int argc, char **args) {
+    bool enable_lj_trigger = false;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(args[i], "--lj-trigger") == 0) enable_lj_trigger = true;
+    }
+
     ck(cudaSetDevice(display_gpu_id));
 
     gx_context *window = (gx_context *)malloc(sizeof(gx_context));
@@ -78,6 +85,18 @@ int main(int argc, char **args) {
     int num_cameras = 0;
     CameraControl *camera_control =
         new CameraControl{false, false, false, false, false};
+
+    LabJackTrigger lj_trigger;
+    if (enable_lj_trigger) {
+        if (!lj_trigger.start()) {
+            fprintf(stderr,
+                    "ERROR: --lj-trigger requested but LabJack failed to "
+                    "start; aborting.\n");
+            return 1;
+        }
+        camera_control->lj_trigger_mode = true;
+        camera_control->lj_trigger = &lj_trigger;
+    }
 
     int evt_buffer_size{100};
     PTPParams *ptp_params =
@@ -133,7 +152,8 @@ int main(int argc, char **args) {
 
     std::thread enet_thread =
         std::thread(&create_enet_thread, &server, my_servers,
-                    &indigo_signal_builder, &quite_enet, ptp_params);
+                    &indigo_signal_builder, &quite_enet, ptp_params,
+                    &lj_trigger);
     std::vector<std::string> color_temps = {"CT_Off",   "CT_2800K", "CT_3000K",
                                             "CT_4000K", "CT_5000K", "CT_6500K",
                                             "CT_Custom"};
@@ -242,6 +262,101 @@ int main(int argc, char **args) {
                     ImGui::SameLine();
             }
 
+            // ============================================================
+            //   LabJack T7 — ScanImage 2-photon sync
+            // ============================================================
+            ImGui::Separator();
+            ImGui::Spacing();
+            if (ImGui::CollapsingHeader("LabJack T7 / ScanImage sync",
+                                        ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Indent();
+                // Once cameras are open the LJ state has been latched into
+                // CameraControl + broadcast in OPENCAMERA — changing it
+                // mid-session would desync master and clients.
+                ImGui::BeginDisabled(camera_control->open);
+
+                if (lj_trigger.running()) {
+                    ImGui::PushStyleColor(
+                        ImGuiCol_Text,
+                        ImVec4(0.20f, 0.85f, 0.30f, 1.0f));
+                    ImGui::Text("[OK] LabJack connected");
+                    ImGui::PopStyleColor();
+                    ImGui::Text("    edges seen: %lu",
+                                (unsigned long)lj_trigger.edge_counter());
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button,
+                                          ImVec4{0.20f, 0.35f, 0.65f, 1.0f});
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                                          ImVec4{0.30f, 0.50f, 0.85f, 1.0f});
+                    if (ImGui::Button("  Search for LabJack  ")) {
+                        if (!lj_trigger.start()) {
+                            fprintf(stderr,
+                                    "[LJ] Search failed — no T7 detected.\n");
+                        }
+                    }
+                    ImGui::PopStyleColor(2);
+                    ImGui::SameLine();
+                    ImGui::PushStyleColor(
+                        ImGuiCol_Text,
+                        ImVec4(0.75f, 0.75f, 0.75f, 1.0f));
+                    ImGui::Text("(disconnected)");
+                    ImGui::PopStyleColor();
+                }
+                ImGui::Spacing();
+
+                // IR rate dropdown — picks how many camera frames per LJ edge.
+                static int lj_mode_idx = 0;
+                static const int lj_mode_n[] = {1, 2, 4};
+                static const char *lj_mode_labels[] = {
+                    "1:1   (40 Hz IR — strict flyback sync)",
+                    "1:2   (80 Hz IR — frame 2 lands mid-scan)",
+                    "1:4   (160 Hz IR — frames 2-4 land mid-scan)"};
+                ImGui::TextDisabled("IR rate (frames per LJ edge):");
+                ImGui::SetNextItemWidth(360.0f);
+                if (ImGui::Combo("##lj_mode", &lj_mode_idx, lj_mode_labels,
+                                 IM_ARRAYSIZE(lj_mode_labels))) {
+                    camera_control->lj_frames_per_edge =
+                        lj_mode_n[lj_mode_idx];
+                }
+                // Keep the field in sync even when not toggled.
+                camera_control->lj_frames_per_edge = lj_mode_n[lj_mode_idx];
+
+                // Warn if the chosen rig folder name and the dropdown N
+                // disagree — the rig's frame_rate is baked into the JSONs and
+                // must match N or the camera will miss triggers.
+                if (network_config_select >= 0 &&
+                    network_config_select <
+                        (int)network_config_folders.size()) {
+                    const std::string &rig_path =
+                        network_config_folders[network_config_select];
+                    int rig_implied_n = -1;
+                    if (rig_path.find("_40hz") != std::string::npos)
+                        rig_implied_n = 1;
+                    else if (rig_path.find("_80hz") != std::string::npos)
+                        rig_implied_n = 2;
+                    else if (rig_path.find("_160hz") != std::string::npos)
+                        rig_implied_n = 4;
+                    if (rig_implied_n > 0 &&
+                        rig_implied_n != lj_mode_n[lj_mode_idx]) {
+                        ImGui::PushStyleColor(
+                            ImGuiCol_Text,
+                            ImVec4(1.0f, 0.55f, 0.0f, 1.0f));
+                        ImGui::TextWrapped(
+                            "WARNING: rig config implies N=%d (frame_rate "
+                            "baked in JSONs) but IR rate dropdown is N=%d. "
+                            "Camera will miss triggers — pick a matching "
+                            "rig + IR rate.",
+                            rig_implied_n, lj_mode_n[lj_mode_idx]);
+                        ImGui::PopStyleColor();
+                    }
+                }
+
+                ImGui::EndDisabled();
+                ImGui::Unindent();
+            }
+            ImGui::Separator();
+            ImGui::Spacing();
+
             if (!camera_control->open &&
                 my_servers[0].server_state == FetchGame::ManagerState_IDLE &&
                 my_servers[1].server_state == FetchGame::ManagerState_IDLE &&
@@ -268,9 +383,14 @@ int main(int argc, char **args) {
                     }
                     select_cameras_have_configs(camera_config_files,
                                                 device_info, check, cam_count);
+                    bool lj_active = lj_trigger.running();
+                    camera_control->lj_trigger_mode = lj_active;
+                    camera_control->lj_trigger =
+                        lj_active ? &lj_trigger : nullptr;
                     host_broadcast_open_cameras(
                         fb_builder, &server,
-                        network_config_folders[network_config_select]);
+                        network_config_folders[network_config_select],
+                        lj_active, camera_control->lj_frames_per_edge);
                     // open cameras
                     num_cameras = 0;
                     for (int i = 0; i < cam_count; i++) {

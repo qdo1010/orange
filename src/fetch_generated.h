@@ -31,11 +31,12 @@ enum ServerControl : int8_t {
   ServerControl_TESTFOCUS = 6,
   ServerControl_SETFOCUS = 7,
   ServerControl_STARTSTREAM = 8,
+  ServerControl_LJEDGE = 9,
   ServerControl_MIN = ServerControl_IDLE,
-  ServerControl_MAX = ServerControl_STARTSTREAM
+  ServerControl_MAX = ServerControl_LJEDGE
 };
 
-inline const ServerControl (&EnumValuesServerControl())[9] {
+inline const ServerControl (&EnumValuesServerControl())[10] {
   static const ServerControl values[] = {
     ServerControl_IDLE,
     ServerControl_OPENCAMERA,
@@ -45,13 +46,14 @@ inline const ServerControl (&EnumValuesServerControl())[9] {
     ServerControl_QUIT,
     ServerControl_TESTFOCUS,
     ServerControl_SETFOCUS,
-    ServerControl_STARTSTREAM
+    ServerControl_STARTSTREAM,
+    ServerControl_LJEDGE
   };
   return values;
 }
 
 inline const char * const *EnumNamesServerControl() {
-  static const char * const names[10] = {
+  static const char * const names[11] = {
     "IDLE",
     "OPENCAMERA",
     "STARTTHREAD",
@@ -61,13 +63,14 @@ inline const char * const *EnumNamesServerControl() {
     "TESTFOCUS",
     "SETFOCUS",
     "STARTSTREAM",
+    "LJEDGE",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameServerControl(ServerControl e) {
-  if (::flatbuffers::IsOutRange(e, ServerControl_IDLE, ServerControl_STARTSTREAM)) return "";
+  if (::flatbuffers::IsOutRange(e, ServerControl_IDLE, ServerControl_LJEDGE)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesServerControl()[index];
 }
@@ -252,7 +255,11 @@ struct Server FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_PTP_GLOBAL_TIME = 16,
     VT_SERVER_STATE = 18,
     VT_FOCUS_VALUE = 20,
-    VT_CAMERA_SERIAL = 22
+    VT_CAMERA_SERIAL = 22,
+    VT_LJ_TRIGGER_MODE = 24,
+    VT_LJ_EDGE_INDEX = 26,
+    VT_LJ_EDGE_TIMESTAMP_NS = 28,
+    VT_LJ_FRAMES_PER_EDGE = 30
   };
   FetchGame::SignalType signal_type() const {
     return static_cast<FetchGame::SignalType>(GetField<int8_t>(VT_SIGNAL_TYPE, 0));
@@ -284,6 +291,18 @@ struct Server FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *camera_serial() const {
     return GetPointer<const ::flatbuffers::String *>(VT_CAMERA_SERIAL);
   }
+  bool lj_trigger_mode() const {
+    return GetField<uint8_t>(VT_LJ_TRIGGER_MODE, 0) != 0;
+  }
+  uint64_t lj_edge_index() const {
+    return GetField<uint64_t>(VT_LJ_EDGE_INDEX, 0);
+  }
+  uint64_t lj_edge_timestamp_ns() const {
+    return GetField<uint64_t>(VT_LJ_EDGE_TIMESTAMP_NS, 0);
+  }
+  int32_t lj_frames_per_edge() const {
+    return GetField<int32_t>(VT_LJ_FRAMES_PER_EDGE, 1);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<int8_t>(verifier, VT_SIGNAL_TYPE, 1) &&
@@ -301,6 +320,10 @@ struct Server FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<int32_t>(verifier, VT_FOCUS_VALUE, 4) &&
            VerifyOffset(verifier, VT_CAMERA_SERIAL) &&
            verifier.VerifyString(camera_serial()) &&
+           VerifyField<uint8_t>(verifier, VT_LJ_TRIGGER_MODE, 1) &&
+           VerifyField<uint64_t>(verifier, VT_LJ_EDGE_INDEX, 8) &&
+           VerifyField<uint64_t>(verifier, VT_LJ_EDGE_TIMESTAMP_NS, 8) &&
+           VerifyField<int32_t>(verifier, VT_LJ_FRAMES_PER_EDGE, 4) &&
            verifier.EndTable();
   }
 };
@@ -339,6 +362,18 @@ struct ServerBuilder {
   void add_camera_serial(::flatbuffers::Offset<::flatbuffers::String> camera_serial) {
     fbb_.AddOffset(Server::VT_CAMERA_SERIAL, camera_serial);
   }
+  void add_lj_trigger_mode(bool lj_trigger_mode) {
+    fbb_.AddElement<uint8_t>(Server::VT_LJ_TRIGGER_MODE, static_cast<uint8_t>(lj_trigger_mode), 0);
+  }
+  void add_lj_edge_index(uint64_t lj_edge_index) {
+    fbb_.AddElement<uint64_t>(Server::VT_LJ_EDGE_INDEX, lj_edge_index, 0);
+  }
+  void add_lj_edge_timestamp_ns(uint64_t lj_edge_timestamp_ns) {
+    fbb_.AddElement<uint64_t>(Server::VT_LJ_EDGE_TIMESTAMP_NS, lj_edge_timestamp_ns, 0);
+  }
+  void add_lj_frames_per_edge(int32_t lj_frames_per_edge) {
+    fbb_.AddElement<int32_t>(Server::VT_LJ_FRAMES_PER_EDGE, lj_frames_per_edge, 1);
+  }
   explicit ServerBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -361,15 +396,23 @@ inline ::flatbuffers::Offset<Server> CreateServer(
     uint64_t ptp_global_time = 0,
     FetchGame::ManagerState server_state = FetchGame::ManagerState_IDLE,
     int32_t focus_value = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> camera_serial = 0) {
+    ::flatbuffers::Offset<::flatbuffers::String> camera_serial = 0,
+    bool lj_trigger_mode = false,
+    uint64_t lj_edge_index = 0,
+    uint64_t lj_edge_timestamp_ns = 0,
+    int32_t lj_frames_per_edge = 1) {
   ServerBuilder builder_(_fbb);
+  builder_.add_lj_edge_timestamp_ns(lj_edge_timestamp_ns);
+  builder_.add_lj_edge_index(lj_edge_index);
   builder_.add_ptp_global_time(ptp_global_time);
+  builder_.add_lj_frames_per_edge(lj_frames_per_edge);
   builder_.add_camera_serial(camera_serial);
   builder_.add_focus_value(focus_value);
   builder_.add_encoder_setup(encoder_setup);
   builder_.add_record_folder(record_folder);
   builder_.add_config_folder(config_folder);
   builder_.add_server_mesg(server_mesg);
+  builder_.add_lj_trigger_mode(lj_trigger_mode);
   builder_.add_server_state(server_state);
   builder_.add_control(control);
   builder_.add_signal_type(signal_type);
@@ -387,7 +430,11 @@ inline ::flatbuffers::Offset<Server> CreateServerDirect(
     uint64_t ptp_global_time = 0,
     FetchGame::ManagerState server_state = FetchGame::ManagerState_IDLE,
     int32_t focus_value = 0,
-    const char *camera_serial = nullptr) {
+    const char *camera_serial = nullptr,
+    bool lj_trigger_mode = false,
+    uint64_t lj_edge_index = 0,
+    uint64_t lj_edge_timestamp_ns = 0,
+    int32_t lj_frames_per_edge = 1) {
   auto config_folder__ = config_folder ? _fbb.CreateString(config_folder) : 0;
   auto record_folder__ = record_folder ? _fbb.CreateString(record_folder) : 0;
   auto encoder_setup__ = encoder_setup ? _fbb.CreateString(encoder_setup) : 0;
@@ -403,7 +450,11 @@ inline ::flatbuffers::Offset<Server> CreateServerDirect(
       ptp_global_time,
       server_state,
       focus_value,
-      camera_serial__);
+      camera_serial__,
+      lj_trigger_mode,
+      lj_edge_index,
+      lj_edge_timestamp_ns,
+      lj_frames_per_edge);
 }
 
 inline const FetchGame::Server *GetServer(const void *buf) {

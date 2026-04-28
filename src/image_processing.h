@@ -14,6 +14,9 @@ typedef struct {
     unsigned long long timestamp;
     unsigned long long frame_id;
     uint64_t timestamp_sys;
+    uint64_t lj_edge_index;        // LJ edge index that triggered this frame
+                                   // (0 when not in LJ-trigger mode)
+    uint64_t lj_edge_timestamp_ns; // CLOCK_REALTIME ns of that edge
 } WORKER_ENTRY;
 
 struct FrameGPU {

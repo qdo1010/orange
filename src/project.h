@@ -69,7 +69,12 @@ void client_send_state_update_message(EnetContext *enet_context,
                                       FetchGame::ManagerState server_state);
 void host_broadcast_open_cameras(flatbuffers::FlatBufferBuilder *builder,
                                  EnetContext *server,
-                                 std::string config_file_name);
+                                 std::string config_file_name,
+                                 bool lj_trigger_mode = false,
+                                 int lj_frames_per_edge = 1);
+void host_broadcast_lj_edge(flatbuffers::FlatBufferBuilder *builder,
+                            EnetContext *server, uint64_t edge_index,
+                            uint64_t edge_timestamp_ns);
 void host_broadcast_start_threads(flatbuffers::FlatBufferBuilder *builder,
                                   EnetContext *server,
                                   std::string record_folder_name,

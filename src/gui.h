@@ -141,7 +141,8 @@ inline void start_camera_streaming(
 
     if (ptp_stream_sync) {
         for (int i = 0; i < num_cameras; i++) {
-            ptp_camera_sync(&ecams[i].camera, &cameras_params[i]);
+            ptp_camera_sync(&ecams[i].camera, &cameras_params[i],
+                            camera_control->lj_frames_per_edge);
         }
         camera_control->sync_camera = true;
     }
@@ -151,6 +152,9 @@ inline void start_camera_streaming(
             camera_trigger_mode(&ecams[i].camera, &cameras_params[i]);
         }
     }
+    // LJ trigger mode reuses the PTP camera setup above (MultiFrame +
+    // FrameCount=1 + TriggerMode=On + TriggerSource=Software). The LJ-edge
+    // gating happens in get_one_frame, not at camera config time.
 
     for (int i = 0; i < num_cameras; i++) {
         camera_threads.emplace_back(

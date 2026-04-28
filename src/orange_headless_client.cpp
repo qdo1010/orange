@@ -1,5 +1,6 @@
 #include "NvEncoder/NvCodecUtils.h"
 #include "fetch_generated.h"
+#include "labjack_trigger.h"
 #include "obj_generated.h"
 #include "network_base.h"
 #include "project.h"
@@ -76,8 +77,12 @@ bool start_camera_thread(std::vector<std::thread> &camera_threads,
         std::cout << "Recorded video saves to : " << record_folder << std::endl;
     }
 
+    // PTP runs regardless of LJ mode — it provides inter-camera clock sync so
+    // all 16 cameras agree on time. LJ mode only affects when get_one_frame
+    // fires TriggerSoftware (on each LJ edge instead of immediately).
     for (int i = 0; i < num_cameras; i++) {
-        ptp_camera_sync(&ecams[i].camera, &cameras_params[i]);
+        ptp_camera_sync(&ecams[i].camera, &cameras_params[i],
+                        camera_control->lj_frames_per_edge);
     }
 
     for (int i = 0; i < num_cameras; i++) {
@@ -91,7 +96,7 @@ bool start_camera_thread(std::vector<std::thread> &camera_threads,
             ptp_params, indigo_signal_builder));
     }
 
-    // wait for all camera ready
+    // wait for all cameras ready (PTP sync gate)
     while (ptp_params->ptp_counter != num_cameras) {
         usleep(10);
     }
@@ -233,6 +238,13 @@ int main(int argc, char *argv[]) {
         printf("Network Initialized!\n");
     }
 
+    // Local LJ trigger receiver (HEADLESS stub). Under HEADLESS this opens
+    // no T7 — it's just a thread-safe edge counter + condvar that
+    // camera threads wait on. inject_edge() is fed from incoming LJEDGE
+    // messages from the master.
+    LabJackTrigger lj_trigger_local;
+    lj_trigger_local.start();
+
     f32 last_time = tick();
     f32 current_time = tick();
 
@@ -281,6 +293,27 @@ int main(int argc, char *argv[]) {
                 } break;
                 // Server has sent us a new packet
                 case ENET_EVENT_TYPE_RECEIVE: {
+                    // Hot path: LJEDGE arrives at the microscope frame rate
+                    // (~40 Hz). Peek + dispatch before the verbose log/parse
+                    // path below to avoid spamming stdout.
+                    {
+                        ::flatbuffers::Verifier v(evnt.packet->data,
+                                                  evnt.packet->dataLength);
+                        if (FetchGame::VerifyServerBuffer(v)) {
+                            auto sc =
+                                FetchGame::GetServer(evnt.packet->data);
+                            if (sc &&
+                                sc->control() ==
+                                    FetchGame::ServerControl_LJEDGE) {
+                                lj_trigger_local.inject_edge(
+                                    sc->lj_edge_index(),
+                                    sc->lj_edge_timestamp_ns());
+                                enet_packet_destroy(evnt.packet);
+                                break;
+                            }
+                        }
+                    }
+
                     printf("\n A packet of length %u was received from %s on "
                            "channel %u.\n",
                            evnt.packet->dataLength, evnt.peer->data,
@@ -373,7 +406,7 @@ int main(int argc, char *argv[]) {
                     // CRITICAL: Check if control() value is valid BEFORE using it
                     // This is the final safety check - obj_msg messages will have invalid control() values
                     auto server_signal = server_control->control();
-                    if (::flatbuffers::IsOutRange(server_signal, FetchGame::ServerControl_IDLE, FetchGame::ServerControl_STARTSTREAM)) {
+                    if (::flatbuffers::IsOutRange(server_signal, FetchGame::ServerControl_IDLE, FetchGame::ServerControl_LJEDGE)) {
                         enet_packet_destroy(evnt.packet);
                         break;
                     }
@@ -381,6 +414,19 @@ int main(int argc, char *argv[]) {
                     if (server_signal == FetchGame::ServerControl_OPENCAMERA) {
                         config_folder =
                             server_control->config_folder()->c_str();
+                        if (manager_context.camera_control) {
+                            bool lj_mode = server_control->lj_trigger_mode();
+                            int n = server_control->lj_frames_per_edge();
+                            if (n < 1) n = 1;
+                            manager_context.camera_control->lj_trigger_mode =
+                                lj_mode;
+                            manager_context.camera_control
+                                ->lj_frames_per_edge = n;
+                            if (lj_mode) {
+                                manager_context.camera_control->lj_trigger =
+                                    &lj_trigger_local;
+                            }
+                        }
                         manager_context.state =
                             FetchGame::ManagerState_OPENCAMERA;
                     } else if (server_signal ==

@@ -1,0 +1,356 @@
+# ScanImage ↔ LabJack ↔ lime synchronization
+
+This integration lets the IR camera array (`orange` / `orange_client`) record
+in lockstep with a ScanImage 2-photon microscope. A LabJack T7 reads
+ScanImage's exported frame-clock TTL, and lime fires camera triggers on each
+falling edge so every IR frame is phase-aligned to the microscope.
+
+## ⚠️ TODO before first real recording
+
+1. **Measure flyback duration on the actual rig.** It hasn't been measured —
+   the design assumes ≈1 ms based on the MINI2P paper, but the real value
+   depends on your scanner's settle time and ScanImage settings. Procedure:
+   - Plug ScanImage's frame-clock BNC into the LabJack T7 **AIN2 + GND**.
+   - Run `/tmp/lj_edges` (build: `gcc /tmp/lj_edges.c -o /tmp/lj_edges
+     -lLabJackM`). It prints one line per detected falling edge with the
+     LOW (= flyback) pulse width. Average a few seconds of output.
+   - Alternative: `/tmp/lj_live | python3 /tmp/lj_plot.py` for the same
+     stats overlaid on a live waveform plot.
+2. **Update camera `exposure` in the mini2p configs to match flyback.**
+   The configs in
+   `/home/ratan/orange_data/config/network/mini2p_{40,80,160}hz/<serial>.json`
+   currently inherit `"exposure": 100` (µs) from the climb rig. For 1:1 sync
+   the exposure must finish *inside* the flyback window — once you have the
+   measured flyback, set `exposure` to comfortably under that (rule of thumb:
+   ≤ 80% of flyback). Apply the same value across all 17 JSON files in each
+   `mini2p_*` dir, on master AND on `vlan-dosa0` AND `vlan-dosa1`. Easy way:
+   ```bash
+   # on each machine
+   sed -i 's/"exposure": [0-9]*/"exposure": <NEW_US>/' \
+     /home/ratan/orange_data/config/network/mini2p_*/*.json
+   ```
+3. **Confirm the 2P PMT optics include an IR-blocking filter** before using
+   1:2 / 1:4 modes (see "IR rate: 1:N modes" below). If the filter isn't
+   confirmed, stay on 1:1.
+
+## At a glance
+
+```
+                 ┌─────────────────┐
+                 │   ScanImage     │  exports a 5V TTL frame clock
+                 │  (2P scope)     │  HIGH = scan, LOW = y-galvo flyback
+                 └────────┬────────┘
+                          │  BNC
+                          ▼
+        ┌──────────────────────────────────────────────────────────┐
+        │ MASTER (dosa-live)                                       │
+        │ ┌────────────┐                  ┌──────────────────┐     │
+        │ │ LabJack T7 │── stream AIN2 ──▶│ LabJackTrigger    │     │
+        │ │  USB       │   10 kHz/10-spr  │  reader thread   │     │
+        │ └────────────┘                  │  - falling-edge  │     │
+        │                                 │    detection     │     │
+        │                                 │  - cv + queue    │     │
+        │                                 └────┬─────────────┘     │
+        │           ┌────────────────────────┐ │ ┌────────────┐    │
+        │           │ master local cameras   │◀┘ │ enet_thread│    │
+        │           │ (5 GigE Emergent)      │   │ broadcasts │    │
+        │           │ wait_for_next_edge →   │   │ LJEDGE msgs│    │
+        │           │ TriggerSoftware        │   └─────┬──────┘    │
+        │           └────────────────────────┘         │           │
+        └──────────────────────────────────────────────┼───────────┘
+                                                       │ ENet
+                                  ┌────────────────────┴────────────────────┐
+                                  │                                          │
+            ┌─────────────────────▼──────────┐         ┌─────────────────────▼──────────┐
+            │ vlan-dosa0 (orange_client)     │         │ vlan-dosa1 (orange_client)     │
+            │  inject_edge() →               │         │  inject_edge() →               │
+            │  wait_for_next_edge →          │         │  wait_for_next_edge →          │
+            │  TriggerSoftware → 6 cameras   │         │  TriggerSoftware → 6 cameras   │
+            └────────────────────────────────┘         └────────────────────────────────┘
+```
+
+## What runs where
+
+| Machine | Binary | Role |
+|---|---|---|
+| dosa-live (this PC) | `targets/orange` | master GUI; owns the LabJack T7 over USB; drives ENet broadcasts |
+| vlan-dosa0 | `targets/orange_client` | headless client, ~6 cameras |
+| vlan-dosa1 | `targets/orange_client` | headless client, ~6 cameras |
+
+Master links `libLabJackM`. Clients use a HEADLESS-stubbed `LabJackTrigger`
+(no LJM dep) — they receive edges via ENet and inject them into their local
+copy of the trigger object so the per-camera wait/notify logic is identical
+on both sides.
+
+## Trigger composition: PTP + LabJack
+
+Two orthogonal mechanisms run **at the same time**:
+
+- **PTP (IEEE 1588)** — synchronizes the *internal clocks* of the 16-ish
+  cameras across the LAN. Configured by `ptp_camera_sync()`
+  (`src/camera.cpp:598`). Without PTP, each camera timestamps frames against
+  its own local clock and per-camera timestamps drift. With PTP, all cameras
+  agree on time to sub-µs.
+- **LabJack-gated triggering** — controls *when* `TriggerSoftware` fires.
+  `get_one_frame()` (`src/video_capture.cpp:372`) waits on the next falling
+  edge from the `LabJackTrigger` and only then fires the trigger.
+
+These are independent. The cameras are configured for `MultiFrame` +
+`AcquisitionFrameCount=N` + `TriggerMode=On` + `TriggerSource=Software` +
+`PtpMode=TwoStep`. PTP sets up a shared start-time gate; LJ provides the
+per-frame trigger pulses.
+
+## IR rate: 1:N modes
+
+The "IR rate" dropdown in the master GUI (under **LabJack T7 / ScanImage
+sync**) selects how many camera frames the camera bursts per LJ falling edge:
+
+| Mode | N | IR rate at 40 Hz scope | Where IR exposures land |
+|---|---|---|---|
+| 1:1 | 1 | 40 Hz  | All inside flyback (~1 ms window). No 2P contamination. |
+| 1:2 | 2 | 80 Hz  | Frame 1 in flyback, frame 2 mid-scan |
+| 1:4 | 4 | 160 Hz | Frame 1 in flyback, frames 2–4 mid-scan |
+
+**The geometric reason 1:N can't keep all frames in flyback**: at 40 Hz the
+microscope cycle is 25 ms, of which only ~1 ms is flyback. A 1:4 burst spaces
+4 frames evenly across 25 ms (one every 6.25 ms) — there's no way to fit
+N>1 exposures inside a 1 ms window because the camera's per-frame readout
+takes several ms at full resolution.
+
+**Implication**: at 1:N (N>1), the IR LED — driven by the camera GPO during
+exposure — fires while the 2P laser is actively scanning the sample. Whether
+that contaminates the 2P signal depends on whether your PMT optics include an
+IR-blocking filter. **Verify before running 1:N modes.** If your PMT doesn't
+filter IR, stick to 1:1.
+
+The first frame of each burst is always at the falling edge (≈ start of
+flyback), so 1:1 mode preserves the strict flyback-gated property.
+
+## Per-frame metadata
+
+Each camera writes `Cam<serial>_meta.csv` next to its `.mp4`:
+
+```
+frame_id,timestamp,timestamp_sys,lj_edge_index,lj_edge_timestamp_ns
+0,1745701234500000000,1745701234500000123,1,1745701234500000050
+1,1745701234525000000,1745701234525000200,2,1745701234525000075
+...
+```
+
+- `frame_id`: monotonic from the camera
+- `timestamp`: camera-internal (PTP-synced across all cameras)
+- `timestamp_sys`: host wall-clock at the moment `EVT_CameraGetFrame()` returned
+- `lj_edge_index`: which LJ falling edge triggered this frame (1-based, monotonic across the session). At 1:N, all N frames in a burst share the same `lj_edge_index`.
+- `lj_edge_timestamp_ns`: host wall-clock at the moment the edge was detected (master's clock for clients too — they receive it via ENet)
+
+Both `lj_edge_*` columns are 0 for frames acquired with LJ trigger disabled.
+
+Use `lj_edge_index` for post-hoc alignment to ScanImage frames — frame N of
+ScanImage corresponds to all rows in the IR meta CSV with `lj_edge_index == N`.
+
+## Hardware setup
+
+1. ScanImage exported frame-clock BNC → LabJack T7 **AIN2 + GND**. The signal
+   is ~5V TTL; AIN2 default range is ±10V so it's fine. Threshold for edge
+   detection is hardcoded at 2.5 V (see `THRESH` in `src/labjack_trigger.cpp`).
+2. T7 connected to dosa-live over USB. Confirmed serial: 470033341 (LJM driver
+   at `/usr/local/lib/libLabJackM.so.1.20.1`).
+3. The 16 cameras are wired and reachable on the camera VLAN as before — no
+   new wiring needed for this integration.
+
+## File map
+
+| File | Role |
+|---|---|
+| `src/labjack_trigger.{h,cpp}` | T7 streamer + edge detector + thread-safe wait/notify. HEADLESS branch is the client stub. |
+| `src/video_capture.cpp:get_one_frame` | Per-frame: wait for LJ edge → fire `TriggerSoftware` → `EVT_CameraGetFrame`. Burst counter implements 1:N. |
+| `src/camera.cpp:ptp_camera_sync` | Camera config (`AcquisitionMode=MultiFrame`, `AcquisitionFrameCount=N`, etc.). Now takes `frames_per_edge` arg. |
+| `src/orange.cpp` (master) | CLI flag parsing, GUI panel, "Search for LabJack" button, IR-rate dropdown, OPENCAMERA broadcast. |
+| `src/orange_headless_client.cpp` | Receives OPENCAMERA + LJEDGE; injects edges; routes lj_trigger_mode/lj_frames_per_edge into `camera_control`. |
+| `src/enet_thread.h` | Master-side ENet event loop. Drains `LabJackTrigger::pending_` and broadcasts LJEDGE messages from the same thread as `service_network` (avoids ENet host race). |
+| `src/project.{h,cpp}` | `host_broadcast_open_cameras` (now carries lj flags) and `host_broadcast_lj_edge` (new). |
+| `schema/fetch.fbs` | FlatBuffers schema. Adds `LJEDGE` ServerControl + `lj_trigger_mode`/`lj_edge_index`/`lj_edge_timestamp_ns`/`lj_frames_per_edge` fields. Regenerate with `flatc --cpp -o src/ schema/fetch.fbs` (need flatc 23.5.26 to match the static_assert). |
+| `src/fetch_generated.h` | Regenerated. Don't hand-edit. |
+| `src/gpu_video_encoder.{h,cpp}` | `WORKER_ENTRY` carries the lj edge fields; `write_metadata` writes the new CSV columns. |
+| `src/image_processing.h` | `WORKER_ENTRY` struct definition. |
+| `src/video_capture.h` | `CameraControl` carries `lj_trigger_mode`, `lj_trigger`, `lj_frames_per_edge`. |
+| `src/gui.h` | `start_camera_streaming` passes `lj_frames_per_edge` into `ptp_camera_sync`. |
+
+## Build
+
+Local (master), full build:
+
+```bash
+cd /home/ratan/src/lime
+./build.sh         # wrapper for ./quick_build/orange.sh
+./targets/orange [--lj-trigger]
+```
+
+`--lj-trigger` is optional: if set, master calls `lj_trigger.start()` at
+launch (pre-clicks the GUI button). Without it, the user can click "Search for
+LabJack" in the GUI to do the same thing at runtime.
+
+Headless clients (lime is **not** under git on the rigs — push files via
+rsync, see `reference_lime_rig_deploy.md` in the assistant memory):
+
+```bash
+# from dosa-live, after editing
+for h in vlan-dosa0 vlan-dosa1; do
+  rsync -aR src/<changed_files...> "$h:/home/ratan/src/lime/"
+  ssh "$h" 'cd src/lime && bash quick_build/orange_client.sh'
+done
+```
+
+`nvcc: command not found` is benign on the rigs: `kernel.cu` rarely changes
+and the existing `targets/kernel.o` is reused. If you do change `kernel.cu`,
+prepend `PATH=/usr/local/cuda/bin:$PATH` to the ssh.
+
+`./targets/orange_client` does **not** link `libLabJackM` (the HEADLESS branch
+of `labjack_trigger.cpp` provides empty stubs). Verify with
+`ldd targets/orange_client | grep -i labjack` — should be empty.
+
+## Operating procedure
+
+1. Start `./targets/orange` on dosa-live. Network panel shows
+   `(disconnected)` and a `Search for LabJack` button under
+   **LabJack T7 / ScanImage sync**.
+2. Plug ScanImage's frame-clock BNC into AIN2 if not already.
+3. Click **Search for LabJack**. On success the line turns green:
+   `[OK] LabJack connected — edges seen: N` (counter increments at 40 Hz
+   while the scope is running).
+4. In the rig selector (radio buttons at the top of the Network panel), pick
+   the matching config: **mini2p_40hz** for 1:1, **mini2p_80hz** for 1:2,
+   **mini2p_160hz** for 1:4. Each config has `frame_rate` set so the camera
+   paces frames evenly across the microscope cycle.
+5. Pick the **IR rate** from the dropdown (1:1 / 1:2 / 1:4) — must match the
+   rig config you just selected.
+6. Click **Open Cameras**. Master broadcasts OPENCAMERA carrying
+   `lj_trigger_mode=true` and `lj_frames_per_edge=N`. Clients read both and
+   set their own `camera_control` accordingly.
+7. Click **Clients start camera threads**. PTP sync runs. Cameras enter the
+   per-frame loop, each blocked on `wait_for_next_edge`.
+8. Click **Start Recording**. PTP gate opens; cameras start grabbing. Each
+   ScanImage falling edge fires a `TriggerSoftware` burst across all 16
+   cameras; each frame is recorded with its `lj_edge_index` in the metadata
+   CSV.
+9. Click **Stop Recording** to end. The "Search for LabJack" button stays
+   connected (T7 stream keeps running until the binary exits).
+
+## Latency budget (rule of thumb)
+
+```
+ScanImage falling edge
+        │
+        │ ≤ 1 ms     (T7 stream chunk: SCAN_RATE=10kHz, SCANS_PER_READ=10)
+        ▼
+LabJackTrigger reader detects edge, notifies cv
+        │
+        │ ≤ 100 µs   (cv wakeup + thread scheduling)
+        ▼            ──▶ master local cameras fire here
+enet_thread loop dequeues + broadcasts LJEDGE
+        │
+        │ ≤ 1 ms     (ENet over LAN)
+        ▼
+Client enet handler → inject_edge → cv notify
+        │
+        │ ≤ 100 µs
+        ▼            ──▶ remote cameras fire here
+```
+
+End-to-end **master → remote camera trigger**: typically ~2–3 ms after the
+ScanImage edge. Well inside the 25 ms microscope period at 40 Hz, but tight
+relative to the ~1 ms flyback window — that's why `SCANS_PER_READ` was
+reduced from 1000 to 10 (was originally giving ~50 ms latency, which would
+have missed flyback entirely).
+
+## Smoke-test priorities (verify on first real run)
+
+These are the assumptions most likely to misbehave on first light. Test in
+this order — each is independent.
+
+1. **Emergent MultiFrame + N>1 trigger semantics**. The code assumes one
+   `TriggerSoftware` in `MultiFrame` mode with `AcquisitionFrameCount=N`
+   produces a burst of N frames. The PTP-only path uses N=1, so this is
+   only stressed by the new 1:N modes. **Test**: pick `mini2p_80hz` rig +
+   `1:2` dropdown. Plug a 40 Hz square wave into AIN2 (function generator).
+   You should see exactly two `Cam<serial>_meta.csv` rows per
+   `lj_edge_index` per camera. If you see only one row per edge, the camera
+   is NOT bursting — we need to fire N `TriggerSoftware`s per edge instead
+   of relying on `AcquisitionFrameCount`.
+
+2. **PTP gate phantom first trigger**. Possible explanation for how the
+   existing PTP path produces frames without an explicit per-frame
+   trigger. If the PTP gate auto-fires one trigger when it opens, then in
+   LJ mode the recording's first frame has `lj_edge_index=0`. **Test**:
+   start a recording, immediately stop, look at the first row of any
+   `Cam<serial>_meta.csv`. If `lj_edge_index=0` for that row but
+   subsequent rows are 1, 2, 3..., it's the gate phantom. Workaround for
+   analysis: drop rows where `lj_edge_index=0`. Workaround for code: don't
+   set `PtpAcquisitionGateTime` in LJ mode (skip that part of
+   `start_ptp_sync`) — but this loses the cross-camera start barrier, so
+   only do it if the phantom turns out to be a real problem.
+
+3. **Master/client clock skew on `lj_edge_timestamp_ns`**. Master timestamps
+   each edge with its own `CLOCK_REALTIME` and broadcasts to clients.
+   Clients write that into their `Cam<serial>_meta.csv`. `timestamp_sys`
+   is the local `CLOCK_REALTIME` on the machine that wrote the row.
+   `lj_edge_timestamp_ns` is always master's clock. If master and clients
+   aren't NTP-synced, the two columns are in different clock frames and
+   may differ by seconds. **Test**: `ssh vlan-dosa0 'date +%s.%N'` vs
+   `date +%s.%N` on master, look for offset. If > a few hundred ms, set up
+   NTP on the rigs (chrony recommended).
+
+## Known gotchas / future work
+
+- **PMT IR filter**: confirm whether the 2P PMT optics filter the IR
+  wavelength before running 1:N modes (see "IR rate" section).
+- **Flyback duration is not measured** — the docs assume ~1 ms based on the
+  MINI2P paper but this is rig-specific and we should measure with
+  `/tmp/lj_edges` or `/tmp/lj_plot.py` (small scratch tools that stream AIN2
+  and report LOW/HIGH/PERIOD pulse widths).
+- **Rig folder ↔ IR-rate dropdown must match**. The rig JSON has a baked-in
+  `frame_rate`; the IR rate dropdown sets the burst size N. They must
+  agree (`mini2p_40hz` ↔ 1:1, `mini2p_80hz` ↔ 1:2, `mini2p_160hz` ↔ 1:4)
+  or the camera will time out / drop triggers. The GUI prints an orange
+  warning under the dropdown if you mismatch them, but doesn't *prevent*
+  it — verify before clicking Open Cameras.
+- **LJ controls lock at "Open Cameras"**. The Search button and the IR-rate
+  dropdown are disabled once `camera_control->open` is true: their values
+  have already been broadcast to clients in OPENCAMERA. If you need to
+  change them, close the cameras first.
+- **`camera_setup_lj_trigger` is dead code** — left declared in `camera.h`
+  for now; unused since PTP+LJ compose. Safe to remove in a cleanup pass.
+- **Volume clock not yet wired** — the user-facing model treats AIN2 as
+  generic "edges per second", so you can plug ScanImage's volume clock into
+  AIN2 instead of the frame clock and it Just Works (slower IR rate, longer
+  flyback per cycle). Document the choice in the recording metadata so post-
+  processing knows what the edges mean.
+- **The `lj_trigger_mode` flag is a plain `bool`** read from camera threads
+  while written from the GUI thread — technically a data race. Reads and
+  writes of aligned bool are atomic on x86 in practice, so no observed
+  issues. Make atomic if migrating to a stricter platform or running with
+  TSAN.
+- **Master button-enable check** (`ptp_counter == num_cameras` at
+  `orange.cpp:~426`) gates the recording buttons on PTP completion. With
+  PTP+LJ composing, ptp_counter still increments because PTP is not skipped,
+  so the buttons enable normally. (Earlier drafts skipped PTP and needed a
+  bypass — that draft was reverted; no bypass is currently present.)
+
+## Smoke testing
+
+Without ScanImage, you can validate the LJ→camera→metadata pipeline by
+plugging a function generator (5 V square wave, 40 Hz, 50% duty) into AIN2
+in place of the ScanImage clock. The "edges seen" counter should tick at the
+generator's rate, cameras should record at IR-rate × N, and meta CSV rows
+should carry monotonic `lj_edge_index` values.
+
+Two scratch tools live in `/tmp/`:
+
+- `/tmp/lj_edges` — prints one line per detected falling edge with rolling
+  flyback / cycle / rate stats. Build with
+  `gcc /tmp/lj_edges.c -o /tmp/lj_edges -lLabJackM`.
+- `/tmp/lj_plot.py` — live matplotlib plot of AIN2 with TTL pulse-width
+  readout overlay. Pipe `/tmp/lj_live` into it.
+
+Both are independent of the lime build and useful for sanity-checking the
+signal before involving the cameras.

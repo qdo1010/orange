@@ -575,10 +575,33 @@ void camera_trigger_mode(Emergent::CEmergentCamera *camera,
                         camera_params->camera_serial.c_str());
 }
 
+// Continuous-mode software-triggered acquisition for LabJack-driven trigger
+// path. Each get_one_frame() call waits on a falling edge from the T7 reader,
+// then issues TriggerSoftware to grab one frame.
+void camera_setup_lj_trigger(Emergent::CEmergentCamera *camera,
+                             CameraParams *camera_params) {
+    check_camera_errors(
+        EVT_CameraSetEnumParam(camera, "AcquisitionMode", "Continuous"),
+        camera_params->camera_serial.c_str());
+    check_camera_errors(
+        EVT_CameraSetEnumParam(camera, "TriggerSelector", "FrameStart"),
+        camera_params->camera_serial.c_str());
+    // Set source before enabling — GenICam convention.
+    check_camera_errors(
+        EVT_CameraSetEnumParam(camera, "TriggerSource", "Software"),
+        camera_params->camera_serial.c_str());
+    check_camera_errors(EVT_CameraSetEnumParam(camera, "TriggerMode", "On"),
+                        camera_params->camera_serial.c_str());
+}
+
 // **********************************************sync*****************************************************
 void ptp_camera_sync(Emergent::CEmergentCamera *camera,
-                     CameraParams *camera_params) {
-    // ptp triggering configuration settings
+                     CameraParams *camera_params, int frames_per_edge) {
+    // ptp triggering configuration settings.
+    // frames_per_edge controls the burst length per software trigger:
+    //   1 → one IR frame per LJ edge (strict 1:1 microscope sync)
+    //   N → N IR frames per LJ edge (1:N mode, IR rate = N × microscope rate)
+    if (frames_per_edge < 1) frames_per_edge = 1;
     check_camera_errors(
         EVT_CameraSetEnumParam(camera, "TriggerSource", "Software"),
         camera_params->camera_serial.c_str());
@@ -586,7 +609,8 @@ void ptp_camera_sync(Emergent::CEmergentCamera *camera,
         EVT_CameraSetEnumParam(camera, "AcquisitionMode", "MultiFrame"),
         camera_params->camera_serial.c_str());
     check_camera_errors(
-        EVT_CameraSetUInt32Param(camera, "AcquisitionFrameCount", 1),
+        EVT_CameraSetUInt32Param(camera, "AcquisitionFrameCount",
+                                 frames_per_edge),
         camera_params->camera_serial.c_str());
     check_camera_errors(EVT_CameraSetEnumParam(camera, "TriggerMode", "On"),
                         camera_params->camera_serial.c_str());

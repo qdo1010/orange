@@ -4,6 +4,7 @@
 #include "global.h"
 #include "obj_generated.h"
 #include "camera.h"
+#include "labjack_trigger.h"
 #include <mutex>
 
 // Shared remote preview buffer — written here, read by render loop
@@ -11,9 +12,19 @@ extern std::mutex g_remote_preview_mu;
 extern std::vector<uint8_t> g_remote_preview_jpeg;
 extern bool g_remote_preview_updated;
 
-void create_enet_thread(EnetContext* server, ConnectedServer* my_servers, INDIGOSignalBuilder* indigo_signal_builder, bool* quit_enet, PTPParams* ptp_params)
+void create_enet_thread(EnetContext* server, ConnectedServer* my_servers, INDIGOSignalBuilder* indigo_signal_builder, bool* quit_enet, PTPParams* ptp_params, LabJackTrigger* lj_trigger = nullptr)
 {
+    flatbuffers::FlatBufferBuilder lj_builder(256);
     while(!(*quit_enet)) {
+        // Drain any pending LJ edges from the local T7 reader and broadcast
+        // them to all connected camera clients. Done from this thread (same
+        // as service_network) so we don't introduce a new ENet-host race.
+        if (lj_trigger) {
+            uint64_t idx = 0, ts = 0;
+            while (lj_trigger->dequeue_pending_edge(&idx, &ts)) {
+                host_broadcast_lj_edge(&lj_builder, server, idx, ts);
+            }
+        }
         service_network(server, ImGui::GetIO().DeltaTime, [&](const ENetEvent& evnt)
         {
             switch (evnt.type)

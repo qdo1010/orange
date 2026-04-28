@@ -3,6 +3,7 @@
 #include "NvEncoder/NvCodecUtils.h"
 #include "global.h"
 #include "gpu_video_encoder.h"
+#include "labjack_trigger.h"
 #include "mjpeg_stream.h"
 #include "utils.h"
 #include <opencv2/opencv.hpp>
@@ -256,8 +257,12 @@ void start_ptp_sync(PTPState *ptp_state, PTPParams *ptp_params,
                        best_focus, best_sharp);
                 fflush(stdout);
 
-                // Restore PTP mode — ready for recording
-                ptp_camera_sync(&ecam->camera, camera_params);
+                // Restore PTP mode — ready for recording. Re-applies the
+                // current LJ burst length so 1:N stays effective after focus.
+                ptp_camera_sync(&ecam->camera, camera_params,
+                                camera_control
+                                    ? camera_control->lj_frames_per_edge
+                                    : 1);
             }
 
             // Handle SETFOCUS: apply focus + grab one frame for preview
@@ -376,7 +381,31 @@ inline void get_one_frame(CameraState *camera_state,
                           void *openGLDisplay, GPUVideoEncoder *gpu_encoder,
                           FrameSaver *frame_saver, void *frame_detector,
                           MjpegServer *mjpeg_server = nullptr) {
-    if (camera_control->trigger_mode) {
+    static thread_local uint64_t last_lj_edge = 0;
+    static thread_local uint64_t last_lj_edge_ts = 0;
+    static thread_local int lj_frames_remaining = 0;
+    if (camera_control->lj_trigger_mode && camera_control->lj_trigger) {
+        if (lj_frames_remaining == 0) {
+            // Burst complete — wait for the next LJ edge before firing again.
+            uint64_t ts = 0;
+            uint64_t e = camera_control->lj_trigger->wait_for_next_edge(
+                last_lj_edge, 1000, &ts);
+            if (e == 0) {
+                // Timeout or stop — bail; outer loop retries.
+                return;
+            }
+            last_lj_edge = e;
+            last_lj_edge_ts = ts;
+            int n = camera_control->lj_frames_per_edge;
+            if (n < 1) n = 1;
+            check_camera_errors(
+                EVT_CameraExecuteCommand(&ecam->camera, "TriggerSoftware"),
+                camera_params->camera_serial.c_str());
+            lj_frames_remaining = n;
+        }
+        // We're inside an N-frame burst; just grab the next frame.
+        lj_frames_remaining--;
+    } else if (camera_control->trigger_mode) {
         std::cout << "trigger" << std::endl;
         check_camera_errors(
             EVT_CameraExecuteCommand(&ecam->camera, "TriggerSoftware"),
@@ -417,7 +446,8 @@ inline void get_one_frame(CameraState *camera_state,
                 ecam->frame_recv.imagePtr, ecam->frame_recv.bufferSize,
                 ecam->frame_recv.size_x, ecam->frame_recv.size_y,
                 ecam->frame_recv.pixel_type, ecam->frame_recv.timestamp,
-                camera_state->frame_count, real_time);
+                camera_state->frame_count, real_time, last_lj_edge,
+                last_lj_edge_ts);
             if (!queued) {
                 camera_state->encoder_drops++;
                 if (camera_state->encoder_drops % 100 == 1)
@@ -790,7 +820,10 @@ void acquire_frames(CameraEmergent *ecam, CameraParams *camera_params,
                camera_params->camera_serial.c_str(), best_focus, best_sharp);
         fflush(stdout);
 
-        // Restore PTP camera settings for next recording
-        ptp_camera_sync(&ecam->camera, camera_params);
+        // Restore PTP camera settings for next recording (preserve LJ burst
+        // length).
+        ptp_camera_sync(&ecam->camera, camera_params,
+                        camera_control ? camera_control->lj_frames_per_edge
+                                       : 1);
     }
 }
