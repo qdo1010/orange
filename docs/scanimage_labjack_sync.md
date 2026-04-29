@@ -158,6 +158,68 @@ Both `lj_edge_*` columns are 0 for frames acquired with LJ trigger disabled.
 Use `lj_edge_index` for post-hoc alignment to ScanImage frames — frame N of
 ScanImage corresponds to all rows in the IR meta CSV with `lj_edge_index == N`.
 
+### Known: rare ±1 mid-recording `lj_edge_index` drift across cameras
+
+You may occasionally see one or two cameras (more often on the rigs than
+the master) whose `lj_edge_index` skips by 2 instead of 1 on a single row
+— e.g. master cam goes `…, 1707, 1708, 1709, …` but a dosa1 cam goes
+`…, 1707, 1709, 1710, …`. This **is not a frame drop**.
+
+Verification: check the camera-internal `timestamp` (PTP) at that frame.
+If all 16 cameras' PTP timestamps for the affected `frame_id` are within
+~50 ns of each other, every camera grabbed the frame at the same physical
+instant — no frame was lost; only the label disagrees.
+
+What's actually happening: when an edge arrives, master broadcasts
+LJEDGE; clients ingest it and notify their camera-thread waiters. If a
+camera thread happens to be slow returning to `wait_for_next_edge`
+(typically because it was finishing an `EVT_CameraGetFrame` + push to
+encoder), the next edge may arrive before the thread reads
+`edge_counter`. `wait_for_next_edge` returns the *latest* counter value,
+so the thread labels the next frame with that — skipping the
+intermediate edge in the label even though the frame physically lands
+at the right PTP time.
+
+Diagnostic recipe (works from dosa-live with sshfs mounts up):
+
+```bash
+session=<session_dir>
+# Find any cameras whose last edge differs from the median:
+for f in /home/ratan/orange_data{,_dosa0,_dosa1}/exp/unsorted/$session/Cam*_meta.csv; do
+  echo "$(tail -1 "$f" | awk -F',' '{print $4}') $(basename $f)"
+done | sort
+# For an outlier cam, compare PTP timestamps frame-by-frame against master:
+diff <(awk -F',' 'NR>1 {print $1, $2}' .../Cam<master>_meta.csv) \
+     <(awk -F',' 'NR>1 {print $1, $2}' .../Cam<outlier>_meta.csv)
+# If PTP-column diffs are <100 ns at every row, no frames were lost.
+```
+
+Implications for analysis:
+
+1. **Align by PTP `timestamp` for the strictest sub-µs cross-camera
+   alignment** — this column is rock solid and unaffected by the LJ
+   labeling race.
+2. **`lj_edge_index` is the right key for "which ScanImage frame did
+   this IR frame correspond to"**, with the caveat that a slow camera
+   thread may attribute a frame to edge K+1 instead of K. The frame is
+   still physically on the boundary between edges K and K+1; it just
+   gets labeled with whichever was current at thread wakeup.
+3. If you're computing per-microscope-frame statistics (e.g.
+   "average IR brightness during edge 1708"), and one or two cameras
+   have no row with `lj_edge_index=1708`, **don't drop those cameras**
+   from that bin — their frame at "edge 1709" is the one you want
+   (it's physically the same moment as everyone else's "edge 1708"
+   row). Match by PTP timestamp instead, or accept the ±1 jitter.
+
+If strict 1:1 sequential labels (no skipping) matter more than physical
+edge attribution, the fix is one line in `video_capture.cpp::get_one_frame`:
+change `wait_for_next_edge` to return `last_seen + 1` instead of the
+current `edge_counter`. This trades the rare cosmetic skip for a small
+mis-attribution when a camera thread is genuinely slow (the frame is
+physically near edge N+2 but gets labeled N+1). Not currently the
+default — current behavior reports the truth about which edge was
+current at trigger time.
+
 ## Hardware setup
 
 1. ScanImage exported frame-clock BNC → LabJack T7 **AIN2 + GND**. The signal
