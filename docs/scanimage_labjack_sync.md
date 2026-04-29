@@ -158,6 +158,80 @@ Both `lj_edge_*` columns are 0 for frames acquired with LJ trigger disabled.
 Use `lj_edge_index` for post-hoc alignment to ScanImage frames — frame N of
 ScanImage corresponds to all rows in the IR meta CSV with `lj_edge_index == N`.
 
+### Analysis: how to pair IR frames in this metadata
+
+There are two distinct pairing problems. Use a different key for each.
+
+| Pairing question | Best key | Accuracy |
+|---|---|---|
+| Which IR frames across the 16 cameras correspond to the same physical instant? | **`timestamp`** (camera-internal PTP) | sub-µs, never drifts |
+| Which microscope frame K does an IR frame belong to? | **`lj_edge_index`** | exact for ~14/16 cams; rare ±1 drift on slow cams |
+
+PTP and the LJ trigger encode different information and aren't
+substitutes:
+- PTP synchronizes the **camera clocks** to each other across the LAN.
+- LJ synchronizes **when each camera fires** to ScanImage's flyback,
+  AND tags each IR frame with the microscope frame number it
+  corresponds to.
+
+You can't drop the LJ trigger — it's what makes the cameras fire on
+microscope events in the first place. ScanImage's clock and the IR
+cameras' PTP clock are independent; the LJ edge is the bridge between
+them. `lj_edge_index` in the metadata is essentially "free" — the
+trigger has to label the frame anyway.
+
+### Recipe: get all 16 cameras' frames for a given microscope frame K
+
+This is the pattern that gets **16/16 cameras every time** despite the
+rare ±1 `lj_edge_index` drift:
+
+```python
+# Pseudocode — adapt to your analysis stack.
+
+# Step 1: index every IR frame by camera, with both keys.
+rows = []
+for cam_serial in all_16_serials:
+    df = pandas.read_csv(f"Cam{cam_serial}_meta.csv")
+    df["serial"] = cam_serial
+    rows.append(df)
+all_rows = pandas.concat(rows)
+
+# Step 2: pull rows where the LJ edge index matches.
+#         Most cams will be in here.
+target_K = 1708
+direct = all_rows[all_rows.lj_edge_index == target_K]
+
+# Step 3: any cameras that didn't show up?
+present = set(direct.serial)
+missing = set(all_16_serials) - present
+if missing:
+    # Step 4: use PTP timestamp to recover the frames from cams whose
+    # lj_edge_index drifted by ±1. Pick a reference PTP from one of
+    # the cams we DID find for K, then for each missing cam pull the
+    # frame whose PTP timestamp is within (say) ±1 ms of that.
+    ref_ts = direct.iloc[0].timestamp
+    for serial in missing:
+        cam_df = all_rows[all_rows.serial == serial]
+        nearest = (cam_df.timestamp - ref_ts).abs().idxmin()
+        if abs(cam_df.loc[nearest].timestamp - ref_ts) < 1_000_000:  # 1 ms
+            direct = pandas.concat([direct, cam_df.loc[[nearest]]])
+        else:
+            # That camera genuinely missed this microscope frame
+            # (very rare; would require a real frame drop in addition
+            # to the labeling drift). Decide whether to skip or
+            # interpolate.
+            pass
+
+# direct now has up to 16 rows, one per camera, all from the same
+# physical microscope flyback K, even when 1-2 cams labeled their
+# row K+1 instead of K.
+```
+
+The PTP fallback in step 4 handles the labeling-drift case (rare ±1
+mismatch) and ALSO handles the rare-but-real frame-drop case — if a
+cam genuinely missed the frame, no PTP within ±1 ms exists and you
+explicitly know that camera lost this microscope cycle.
+
 ### Known: rare ±1 mid-recording `lj_edge_index` drift across cameras
 
 You may occasionally see one or two cameras (more often on the rigs than
