@@ -180,6 +180,48 @@ cameras' PTP clock are independent; the LJ edge is the bridge between
 them. `lj_edge_index` in the metadata is essentially "free" — the
 trigger has to label the frame anyway.
 
+### Master `lj_edge_index` is the trustworthy source of truth
+
+The drift can't happen on master cams. On master, the LJ edge counter is
+updated by the local reader thread, which only fires once per ScanImage
+falling edge (~25 ms apart). Master's camera threads have a generous
+window to wake up and read the same value before the next edge update
+arrives. Empirically: master cams never drift among themselves.
+
+The drift only affects **clients (dosa0, dosa1)** because there, the
+counter is updated by the ENet receive thread calling `inject_edge`.
+ENet can deliver packets in microsecond-spaced bursts (network buffering),
+shrinking the contention window between two `inject_edge` calls and
+giving some camera threads time to wake up and read the second update.
+
+**So treat master's `lj_edge_index` as authoritative**, and pair
+dosa0/dosa1 frames to master by PTP timestamp:
+
+```python
+# Pick any master cam; they all agree.
+ref = master_cam_df
+
+for K in microscope_frames_of_interest:
+    master_rows = ref[ref.lj_edge_index == K]
+    if master_rows.empty:
+        continue  # master itself didn't capture K (rare — real frame drop)
+    ref_ptp = master_rows.iloc[0].timestamp
+
+    # Match each client cam by PTP nearest, ignoring its lj_edge_index.
+    paired = []
+    for client_cam_df in client_cam_dfs:
+        idx = (client_cam_df.timestamp - ref_ptp).abs().idxmin()
+        dt = abs(client_cam_df.loc[idx].timestamp - ref_ptp)
+        if dt < 1_000_000:  # 1 ms tolerance — sub-µs is typical
+            paired.append(client_cam_df.loc[idx])
+    # paired has 1 row per client cam, all physically synced to the master
+    # frame for microscope frame K, regardless of accumulated drift.
+```
+
+This is the simplest correct workflow. The more general PTP-fallback
+recipe below is still valid (it handles the very rare case where master
+itself drops a frame, by PTP-matching across all cams symmetrically).
+
 ### Recipe: get all 16 cameras' frames for a given microscope frame K
 
 This is the pattern that gets **16/16 cameras every time** despite the
