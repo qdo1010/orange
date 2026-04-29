@@ -239,6 +239,15 @@ the master) whose `lj_edge_index` skips by 2 instead of 1 on a single row
 — e.g. master cam goes `…, 1707, 1708, 1709, …` but a dosa1 cam goes
 `…, 1707, 1709, 1710, …`. This **is not a frame drop**.
 
+**The offset is sticky** — once a cam skips an edge in its labels, every
+subsequent label on that cam stays +1 ahead of master for the rest of the
+recording (and if it drifts again, +2, etc.). It does not self-correct.
+That's because each camera's "next label" is computed from its own
+previous label (`last_seen + 1`), so the offset compounds. So the
+mitigation is *not* "skip one row on the affected cam" — it's "do
+per-frame matching by PTP timestamp" (the recipe above), which works
+regardless of how many sticky drifts have accumulated.
+
 Verification: check the camera-internal `timestamp` (PTP) at that frame.
 If all 16 cameras' PTP timestamps for the affected `frame_id` are within
 ~50 ns of each other, every camera grabbed the frame at the same physical
