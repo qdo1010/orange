@@ -5,33 +5,43 @@ in lockstep with a ScanImage 2-photon microscope. A LabJack T7 reads
 ScanImage's exported frame-clock TTL, and lime fires camera triggers on each
 falling edge so every IR frame is phase-aligned to the microscope.
 
+## Measured rig timing (2026-04-28)
+
+Frame clock on this rig at 40 Hz, measured live with ScanImage running and
+the frame clock on LabJack T7 AIN2 (`/tmp/lj_plot.py`):
+
+| Phase | Duration | Notes |
+|---|---|---|
+| Period | **25 ms** | 40 Hz |
+| HIGH (active scan) | **22.83 ms** | y-galvo scanning, laser on sample |
+| LOW (flyback) | **2.16 ms** | y-galvo retrace, laser between rasters |
+| Duty cycle | 91 % HIGH / 9 % LOW | |
+
+Use **2.16 ms** as the flyback budget for exposure decisions. (~2× wider
+than the 1 ms placeholder I had inferred from the MINI2P paper.) If
+ScanImage settings change — different FOV, zoom, scan rate, MEMS frequency
+— re-measure with `/tmp/lj_plot.py` before recording.
+
 ## ⚠️ TODO before first real recording
 
-1. **Measure flyback duration on the actual rig.** It hasn't been measured —
-   the design assumes ≈1 ms based on the MINI2P paper, but the real value
-   depends on your scanner's settle time and ScanImage settings. Procedure:
-   - Plug ScanImage's frame-clock BNC into the LabJack T7 **AIN2 + GND**.
-   - Run `/tmp/lj_edges` (build: `gcc /tmp/lj_edges.c -o /tmp/lj_edges
-     -lLabJackM`). It prints one line per detected falling edge with the
-     LOW (= flyback) pulse width. Average a few seconds of output.
-   - Alternative: `/tmp/lj_live | python3 /tmp/lj_plot.py` for the same
-     stats overlaid on a live waveform plot.
-2. **Update camera `exposure` in the mini2p configs to match flyback.**
-   The configs in
-   `/home/ratan/orange_data/config/network/mini2p_{40,80,160}hz/<serial>.json`
-   currently inherit `"exposure": 100` (µs) from the climb rig. For 1:1 sync
-   the exposure must finish *inside* the flyback window — once you have the
-   measured flyback, set `exposure` to comfortably under that (rule of thumb:
-   ≤ 80% of flyback). Apply the same value across all 17 JSON files in each
-   `mini2p_*` dir, on master AND on `vlan-dosa0` AND `vlan-dosa1`. Easy way:
+1. **Set camera `exposure` to fit inside the 2.16 ms flyback.** The mini2p
+   configs currently inherit `"exposure": 250` (µs) — already safe (12 % of
+   the flyback window, ~1.9 ms of margin after exposure ends). You can
+   crank up to ~1500 µs (≈70 % of flyback) for more SNR, or stay at 250
+   µs for a generous safety margin. To bulk-edit:
    ```bash
-   # on each machine
+   # on each machine (master + vlan-dosa0 + vlan-dosa1)
    sed -i 's/"exposure": [0-9]*/"exposure": <NEW_US>/' \
      /home/ratan/orange_data/config/network/mini2p_*/*.json
    ```
-3. **Confirm the 2P PMT optics include an IR-blocking filter** before using
+2. **Confirm the 2P PMT optics include an IR-blocking filter** before using
    1:2 / 1:4 modes (see "IR rate: 1:N modes" below). If the filter isn't
    confirmed, stay on 1:1.
+3. **Click "Search for LabJack" BEFORE clicking "Open Cameras".** The LJ
+   mode flag is latched at the OPENCAMERA broadcast moment, so a Search
+   click after Open Cameras has no effect this session — you'd record a
+   PTP-only run with `lj_edge_index=0` throughout. The Search button
+   intentionally disables once cameras are open as a hint.
 
 ## At a glance
 

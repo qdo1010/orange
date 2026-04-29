@@ -41,6 +41,11 @@ struct CameraControl {
     // (IR rate matches microscope, exposure inside flyback). 2/4 = 1:2/1:4
     // (IR rate = N×microscope rate, frames 2..N land mid-scan).
     int lj_frames_per_edge = 1;
+    // First-frame edge label set by master at STARTRECORDING. All cameras
+    // init their per-thread last_lj_edge = lj_start_edge - 1 so the first
+    // wait_for_next_edge returns exactly lj_start_edge for everyone — kills
+    // the cross-camera 1-edge labeling race at recording start.
+    uint64_t lj_start_edge = 0;
     std::atomic<int> focus_test_generation{0};
     SetFocusRequest setfocus;
 };

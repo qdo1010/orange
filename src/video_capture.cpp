@@ -384,8 +384,15 @@ inline void get_one_frame(CameraState *camera_state,
     static thread_local uint64_t last_lj_edge = 0;
     static thread_local uint64_t last_lj_edge_ts = 0;
     static thread_local int lj_frames_remaining = 0;
+    static thread_local bool lj_first_wait = true;
     if (camera_control->lj_trigger_mode && camera_control->lj_trigger) {
         if (lj_frames_remaining == 0) {
+            // First wait this session: align to master-broadcast start edge so
+            // every camera labels its first frame with the same lj_edge_index.
+            if (lj_first_wait && camera_control->lj_start_edge > 0) {
+                last_lj_edge = camera_control->lj_start_edge - 1;
+            }
+            lj_first_wait = false;
             // Burst complete — wait for the next LJ edge before firing again.
             uint64_t ts = 0;
             uint64_t e = camera_control->lj_trigger->wait_for_next_edge(

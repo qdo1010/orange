@@ -567,12 +567,14 @@ void host_broadcast_start_threads(flatbuffers::FlatBufferBuilder *builder,
 
 void host_broadcast_set_start_ptp(flatbuffers::FlatBufferBuilder *builder,
                                   EnetContext *server,
-                                  unsigned long long ptp_global_time) {
-    // send the global time to servers
+                                  unsigned long long ptp_global_time,
+                                  uint64_t lj_start_edge) {
+    // send the global time + LJ start-edge label to servers
     builder->Clear();
     FetchGame::ServerBuilder server_builder(*builder);
     server_builder.add_control(FetchGame::ServerControl_STARTRECORDING);
     server_builder.add_ptp_global_time(ptp_global_time);
+    server_builder.add_lj_start_edge(lj_start_edge);
     auto my_server = server_builder.Finish();
     builder->Finish(my_server);
     uint8_t *server_buffer = builder->GetBufferPointer();
@@ -584,11 +586,13 @@ void host_broadcast_set_start_ptp(flatbuffers::FlatBufferBuilder *builder,
 
 void host_broadcast_start_stream(flatbuffers::FlatBufferBuilder *builder,
                                  EnetContext *server,
-                                 unsigned long long ptp_global_time) {
+                                 unsigned long long ptp_global_time,
+                                 uint64_t lj_start_edge) {
     builder->Clear();
     FetchGame::ServerBuilder server_builder(*builder);
     server_builder.add_control(FetchGame::ServerControl_STARTSTREAM);
     server_builder.add_ptp_global_time(ptp_global_time);
+    server_builder.add_lj_start_edge(lj_start_edge);
     auto my_server = server_builder.Finish();
     builder->Finish(my_server);
     uint8_t *server_buffer = builder->GetBufferPointer();

@@ -58,6 +58,7 @@ table Server {
     lj_edge_index:ulong = 0;
     lj_edge_timestamp_ns:ulong = 0;
     lj_frames_per_edge:int = 1;
+    lj_start_edge:ulong = 0;
 }
 
 root_type Server;

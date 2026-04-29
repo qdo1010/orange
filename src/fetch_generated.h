@@ -259,7 +259,8 @@ struct Server FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_LJ_TRIGGER_MODE = 24,
     VT_LJ_EDGE_INDEX = 26,
     VT_LJ_EDGE_TIMESTAMP_NS = 28,
-    VT_LJ_FRAMES_PER_EDGE = 30
+    VT_LJ_FRAMES_PER_EDGE = 30,
+    VT_LJ_START_EDGE = 32
   };
   FetchGame::SignalType signal_type() const {
     return static_cast<FetchGame::SignalType>(GetField<int8_t>(VT_SIGNAL_TYPE, 0));
@@ -303,6 +304,9 @@ struct Server FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   int32_t lj_frames_per_edge() const {
     return GetField<int32_t>(VT_LJ_FRAMES_PER_EDGE, 1);
   }
+  uint64_t lj_start_edge() const {
+    return GetField<uint64_t>(VT_LJ_START_EDGE, 0);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<int8_t>(verifier, VT_SIGNAL_TYPE, 1) &&
@@ -324,6 +328,7 @@ struct Server FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<uint64_t>(verifier, VT_LJ_EDGE_INDEX, 8) &&
            VerifyField<uint64_t>(verifier, VT_LJ_EDGE_TIMESTAMP_NS, 8) &&
            VerifyField<int32_t>(verifier, VT_LJ_FRAMES_PER_EDGE, 4) &&
+           VerifyField<uint64_t>(verifier, VT_LJ_START_EDGE, 8) &&
            verifier.EndTable();
   }
 };
@@ -374,6 +379,9 @@ struct ServerBuilder {
   void add_lj_frames_per_edge(int32_t lj_frames_per_edge) {
     fbb_.AddElement<int32_t>(Server::VT_LJ_FRAMES_PER_EDGE, lj_frames_per_edge, 1);
   }
+  void add_lj_start_edge(uint64_t lj_start_edge) {
+    fbb_.AddElement<uint64_t>(Server::VT_LJ_START_EDGE, lj_start_edge, 0);
+  }
   explicit ServerBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -400,8 +408,10 @@ inline ::flatbuffers::Offset<Server> CreateServer(
     bool lj_trigger_mode = false,
     uint64_t lj_edge_index = 0,
     uint64_t lj_edge_timestamp_ns = 0,
-    int32_t lj_frames_per_edge = 1) {
+    int32_t lj_frames_per_edge = 1,
+    uint64_t lj_start_edge = 0) {
   ServerBuilder builder_(_fbb);
+  builder_.add_lj_start_edge(lj_start_edge);
   builder_.add_lj_edge_timestamp_ns(lj_edge_timestamp_ns);
   builder_.add_lj_edge_index(lj_edge_index);
   builder_.add_ptp_global_time(ptp_global_time);
@@ -434,7 +444,8 @@ inline ::flatbuffers::Offset<Server> CreateServerDirect(
     bool lj_trigger_mode = false,
     uint64_t lj_edge_index = 0,
     uint64_t lj_edge_timestamp_ns = 0,
-    int32_t lj_frames_per_edge = 1) {
+    int32_t lj_frames_per_edge = 1,
+    uint64_t lj_start_edge = 0) {
   auto config_folder__ = config_folder ? _fbb.CreateString(config_folder) : 0;
   auto record_folder__ = record_folder ? _fbb.CreateString(record_folder) : 0;
   auto encoder_setup__ = encoder_setup ? _fbb.CreateString(encoder_setup) : 0;
@@ -454,7 +465,8 @@ inline ::flatbuffers::Offset<Server> CreateServerDirect(
       lj_trigger_mode,
       lj_edge_index,
       lj_edge_timestamp_ns,
-      lj_frames_per_edge);
+      lj_frames_per_edge,
+      lj_start_edge);
 }
 
 inline const FetchGame::Server *GetServer(const void *buf) {

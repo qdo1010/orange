@@ -56,9 +56,14 @@ bool LabJackTrigger::dequeue_pending_edge(uint64_t *, uint64_t *) {
 }
 
 void LabJackTrigger::inject_edge(uint64_t idx, uint64_t ts_ns) {
+    // Always set (no monotonic-max). The client must follow whatever index
+    // the master is currently broadcasting — even if that's "lower than
+    // before" because the master process restarted and its counter started
+    // over from 0. ENet within a single peer/channel preserves order in
+    // practice, so out-of-order delivery isn't a concern here.
     {
         std::lock_guard<std::mutex> lock(mu_);
-        if (idx > edge_counter_) edge_counter_ = idx;
+        edge_counter_ = idx;
         edge_timestamp_ns_ = ts_ns;
     }
     cv_.notify_all();
@@ -196,9 +201,10 @@ bool LabJackTrigger::dequeue_pending_edge(uint64_t *idx, uint64_t *ts_ns) {
 }
 
 void LabJackTrigger::inject_edge(uint64_t idx, uint64_t ts_ns) {
+    // Always set (no monotonic-max) — see HEADLESS branch comment.
     {
         std::lock_guard<std::mutex> lock(mu_);
-        if (idx > edge_counter_) edge_counter_ = idx;
+        edge_counter_ = idx;
         edge_timestamp_ns_ = ts_ns;
     }
     cv_.notify_all();

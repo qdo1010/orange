@@ -445,6 +445,10 @@ int main(int argc, char *argv[]) {
                         ptp_params->ptp_global_time =
                             server_control->ptp_global_time();
                         std::cout << ptp_params->ptp_global_time << std::endl;
+                        if (manager_context.camera_control) {
+                            manager_context.camera_control->lj_start_edge =
+                                server_control->lj_start_edge();
+                        }
                         ptp_params->network_set_start_ptp = true;
                         manager_context.state =
                             FetchGame::ManagerState_WAITSTOP;
@@ -465,8 +469,11 @@ int main(int argc, char *argv[]) {
                         ptp_params->ptp_global_time =
                             server_control->ptp_global_time();
                         std::cout << "STARTSTREAM " << ptp_params->ptp_global_time << std::endl;
-                        if (manager_context.camera_control)
+                        if (manager_context.camera_control) {
                             manager_context.camera_control->record_video = false;
+                            manager_context.camera_control->lj_start_edge =
+                                server_control->lj_start_edge();
+                        }
                         ptp_params->network_set_start_ptp = true;
                         manager_context.state =
                             FetchGame::ManagerState_WAITSTOP;

@@ -81,7 +81,8 @@ void host_broadcast_start_threads(flatbuffers::FlatBufferBuilder *builder,
                                   std::string encoder_basic_setup);
 void host_broadcast_set_start_ptp(flatbuffers::FlatBufferBuilder *builder,
                                   EnetContext *server,
-                                  unsigned long long ptp_global_time);
+                                  unsigned long long ptp_global_time,
+                                  uint64_t lj_start_edge = 0);
 void host_broadcast_test_focus(flatbuffers::FlatBufferBuilder *builder,
                                EnetContext *server);
 void host_broadcast_setfocus(flatbuffers::FlatBufferBuilder *builder,
@@ -89,6 +90,7 @@ void host_broadcast_setfocus(flatbuffers::FlatBufferBuilder *builder,
                              int focus_value);
 void host_broadcast_start_stream(flatbuffers::FlatBufferBuilder *builder,
                                  EnetContext *server,
-                                 unsigned long long ptp_global_time);
+                                 unsigned long long ptp_global_time,
+                                 uint64_t lj_start_edge = 0);
 
 #endif

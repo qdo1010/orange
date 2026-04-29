@@ -536,8 +536,19 @@ int main(int argc, char **args) {
                         ptp_params->ptp_global_time =
                             ((unsigned long long)delay_in_second) * 1000000000 +
                             ptp_time;
+                        // Pick a future edge as the shared first-frame label.
+                        // 10-edge buffer (~250 ms at 40 Hz) absorbs thread
+                        // startup jitter — small enough that recording starts
+                        // promptly, large enough that all camera threads
+                        // reach wait_for_next_edge before edge K arrives.
+                        uint64_t start_edge = 0;
+                        if (lj_trigger.running()) {
+                            start_edge = lj_trigger.edge_counter() + 10;
+                            camera_control->lj_start_edge = start_edge;
+                        }
                         host_broadcast_set_start_ptp(
-                            fb_builder, &server, ptp_params->ptp_global_time);
+                            fb_builder, &server, ptp_params->ptp_global_time,
+                            start_edge);
                         ptp_params->network_set_start_ptp = true;
                         g_stream_mode = false;
                     }
@@ -551,8 +562,14 @@ int main(int argc, char **args) {
                         ptp_params->ptp_global_time =
                             ((unsigned long long)delay_in_second) * 1000000000 +
                             ptp_time;
+                        uint64_t start_edge = 0;
+                        if (lj_trigger.running()) {
+                            start_edge = lj_trigger.edge_counter() + 10;
+                            camera_control->lj_start_edge = start_edge;
+                        }
                         host_broadcast_start_stream(
-                            fb_builder, &server, ptp_params->ptp_global_time);
+                            fb_builder, &server, ptp_params->ptp_global_time,
+                            start_edge);
                         ptp_params->network_set_start_ptp = true;
                         g_stream_mode = true;
                     }
