@@ -69,6 +69,10 @@ void LabJackTrigger::inject_edge(uint64_t idx, uint64_t ts_ns) {
     cv_.notify_all();
 }
 
+// master-only: clients have no T7 to read AIN2 from
+void LabJackTrigger::start_logging(const std::string &) {}
+void LabJackTrigger::stop_logging() {}
+
 #else
 
 #include <LabJackM.h>
@@ -78,7 +82,12 @@ namespace {
 // ~1 ms per LJM_eStreamRead, which keeps detection latency well under the
 // ~25 ms ScanImage frame period.
 constexpr int SCANS_PER_READ = 10;
-constexpr int NUM_CHANNELS = 1;
+// Channel 0: AIN2 (ScanImage frame clock — the edge source we trigger on).
+// Channel 1: AIN0 (witness — typically tied to the IR-driver daisy-chain
+//            TRIG_OUT so we can see when the LED actually fires).
+// Edge detection only looks at channel 0; channel 1 is logged but unused
+// by the trigger logic.
+constexpr int NUM_CHANNELS = 2;
 constexpr size_t PENDING_QUEUE_CAP = 256;
 
 uint64_t now_ns() {
@@ -108,11 +117,12 @@ bool LabJackTrigger::start(double scan_rate_hz, double threshold_v) {
     }
 
     const char *cfg_names[] = {"AIN2_RANGE", "AIN2_RESOLUTION_INDEX",
+                               "AIN0_RANGE", "AIN0_RESOLUTION_INDEX",
                                "STREAM_SETTLING_US",
                                "STREAM_RESOLUTION_INDEX"};
-    double cfg_vals[] = {10.0, 0.0, 0.0, 0.0};
+    double cfg_vals[] = {10.0, 0.0, 10.0, 0.0, 0.0, 0.0};
     int errAddr = 0;
-    err = LJM_eWriteNames(handle_, 4, cfg_names, cfg_vals, &errAddr);
+    err = LJM_eWriteNames(handle_, 6, cfg_names, cfg_vals, &errAddr);
     if (err) {
         log_ljm_err(err, "LJM_eWriteNames");
         LJM_Close(handle_);
@@ -122,6 +132,7 @@ bool LabJackTrigger::start(double scan_rate_hz, double threshold_v) {
 
     int scan_list[NUM_CHANNELS];
     err = LJM_NameToAddress("AIN2", &scan_list[0], NULL);
+    if (!err) err = LJM_NameToAddress("AIN0", &scan_list[1], NULL);
     if (err) {
         log_ljm_err(err, "LJM_NameToAddress");
         LJM_Close(handle_);
@@ -144,6 +155,7 @@ bool LabJackTrigger::start(double scan_rate_hz, double threshold_v) {
             "(TTL threshold %.2fV)\n",
             rate, threshold_v);
 
+    scan_rate_hz_ = rate;
     stop_flag_.store(false);
     running_.store(true);
     reader_thread_ =
@@ -151,8 +163,49 @@ bool LabJackTrigger::start(double scan_rate_hz, double threshold_v) {
     return true;
 }
 
+void LabJackTrigger::start_logging(const std::string &path) {
+    std::lock_guard<std::mutex> lock(log_mu_);
+    if (log_active_) {
+        log_file_.close();
+        log_active_ = false;
+    }
+    log_file_.open(path, std::ios::binary | std::ios::trunc);
+    if (!log_file_.is_open()) {
+        fprintf(stderr,
+                "[LabJackTrigger] failed to open log file: %s\n",
+                path.c_str());
+        return;
+    }
+    // Header (24 B): uint64 start_ns + double rate_hz + uint32 num_channels
+    //                 + uint32 reserved.  Then interleaved float64 samples,
+    //                 NUM_CHANNELS per scan, in scan_list order (AIN2, AIN0).
+    uint64_t start_ns = now_ns();
+    double rate = scan_rate_hz_;
+    uint32_t num_channels = NUM_CHANNELS;
+    uint32_t reserved = 0;
+    log_file_.write(reinterpret_cast<const char *>(&start_ns), 8);
+    log_file_.write(reinterpret_cast<const char *>(&rate), 8);
+    log_file_.write(reinterpret_cast<const char *>(&num_channels), 4);
+    log_file_.write(reinterpret_cast<const char *>(&reserved), 4);
+    log_path_ = path;
+    log_active_ = true;
+    fprintf(stderr,
+            "[LabJackTrigger] logging AIN2 to %s (rate=%.2f Hz)\n",
+            path.c_str(), rate);
+}
+
+void LabJackTrigger::stop_logging() {
+    std::lock_guard<std::mutex> lock(log_mu_);
+    if (!log_active_) return;
+    log_file_.close();
+    log_active_ = false;
+    fprintf(stderr, "[LabJackTrigger] stopped logging to %s\n",
+            log_path_.c_str());
+}
+
 void LabJackTrigger::stop() {
     if (!running_.load()) return;
+    stop_logging(); // close any open log file before tearing down
     stop_flag_.store(true);
     cv_.notify_all();
     if (reader_thread_.joinable()) reader_thread_.join();
@@ -224,8 +277,20 @@ void LabJackTrigger::reader_loop_(double scan_rate_hz, double threshold_v) {
             log_ljm_err(err, "LJM_eStreamRead");
             break;
         }
-        for (int i = 0; i < buf_len; i++) {
-            int above = buf[i] > threshold_v ? 1 : 0;
+        // Log raw samples to disk if recording is active. Quick check
+        // under log_mu_; the write is the slowest operation here but
+        // file I/O at 10 kS/s × 8 B = 80 kB/s is trivial.
+        {
+            std::lock_guard<std::mutex> lock(log_mu_);
+            if (log_active_ && log_file_.is_open()) {
+                log_file_.write(reinterpret_cast<const char *>(buf.data()),
+                                buf_len * sizeof(double));
+            }
+        }
+        // Edge detection on channel 0 (AIN2) only.
+        for (int scan = 0; scan < SCANS_PER_READ; scan++) {
+            double ain2 = buf[scan * NUM_CHANNELS + 0];
+            int above = ain2 > threshold_v ? 1 : 0;
             if (prev_above == 1 && above == 0) {
                 uint64_t ts = now_ns();
                 {

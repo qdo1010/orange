@@ -5,7 +5,9 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <fstream>
 #include <mutex>
+#include <string>
 #include <thread>
 
 // Reads a TTL clock signal (e.g. ScanImage frame clock) on the LabJack T7's
@@ -51,6 +53,18 @@ class LabJackTrigger {
     // pending_ — clients don't re-broadcast.
     void inject_edge(uint64_t idx, uint64_t ts_ns);
 
+    // Master only: begin writing every analog sample to a binary file.
+    // Format (24-byte header):
+    //   uint64_t start_clock_realtime_ns
+    //   double   scan_rate_hz
+    //   uint32_t num_channels
+    //   uint32_t reserved
+    // followed by interleaved float64 samples (num_channels per scan, in
+    // scan_list order: currently AIN2, then AIN0).
+    // No-op when not streaming, or in HEADLESS clients.
+    void start_logging(const std::string &path);
+    void stop_logging();
+
   private:
     int handle_ = -1;
     std::thread reader_thread_;
@@ -62,6 +76,13 @@ class LabJackTrigger {
     uint64_t edge_counter_ = 0;
     uint64_t edge_timestamp_ns_ = 0;
     std::deque<std::pair<uint64_t, uint64_t>> pending_; // (idx, ts_ns)
+
+    // AIN2 raw-sample logging (master only)
+    std::mutex log_mu_;
+    std::ofstream log_file_;
+    std::string log_path_;
+    bool log_active_ = false;
+    double scan_rate_hz_ = 0.0;
 
     void reader_loop_(double scan_rate_hz, double threshold_v);
 };

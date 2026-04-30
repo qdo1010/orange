@@ -545,6 +545,12 @@ int main(int argc, char **args) {
                         if (lj_trigger.running()) {
                             start_edge = lj_trigger.edge_counter() + 10;
                             camera_control->lj_start_edge = start_edge;
+                            // Save raw AIN2 stream alongside the recording
+                            // so we can correlate the analog signal with
+                            // any 2P artifacts post-hoc.
+                            lj_trigger.start_logging(
+                                encoder_config->folder_name +
+                                "/labjack_ain2.bin");
                         }
                         host_broadcast_set_start_ptp(
                             fb_builder, &server, ptp_params->ptp_global_time,
@@ -566,6 +572,9 @@ int main(int argc, char **args) {
                         if (lj_trigger.running()) {
                             start_edge = lj_trigger.edge_counter() + 10;
                             camera_control->lj_start_edge = start_edge;
+                            lj_trigger.start_logging(
+                                encoder_config->folder_name +
+                                "/labjack_ain2.bin");
                         }
                         host_broadcast_start_stream(
                             fb_builder, &server, ptp_params->ptp_global_time,
@@ -587,12 +596,30 @@ int main(int argc, char **args) {
                                       ImVec4{0, 0.5f, 0, 1.0f});
                 if (ImGui::Button("Stop Recording")) {
                     std::cout << "DEBUG SERVER: 'Stop Recording' button pressed by user" << std::endl;
-                    unsigned long long ptp_time =
-                        get_current_PTP_time(&ecams[0].camera);
-                    int delay_in_second = 3;
-                    ptp_params->ptp_stop_time =
-                        ((unsigned long long)delay_in_second) * 1000000000 +
-                        ptp_time;
+                    bool lj_one_to_one =
+                        camera_control && camera_control->lj_trigger_mode &&
+                        camera_control->lj_frames_per_edge == 1;
+                    if (lj_one_to_one && lj_trigger.running()) {
+                        // In 1:1 LJ mode the camera-PTP clocks are free-
+                        // running (PtpMode=Off), so a wall-clock-based
+                        // stop-time isn't comparable across cameras.
+                        // Reuse ptp_stop_time as the LJ edge index after
+                        // which all cameras stop. 10-edge buffer (~250 ms
+                        // at 40 Hz) absorbs ENet broadcast jitter.
+                        ptp_params->ptp_stop_time =
+                            lj_trigger.edge_counter() + 10;
+                    } else {
+                        unsigned long long ptp_time =
+                            get_current_PTP_time(&ecams[0].camera);
+                        int delay_in_second = 3;
+                        ptp_params->ptp_stop_time =
+                            ((unsigned long long)delay_in_second) *
+                                1000000000 +
+                            ptp_time;
+                    }
+                    // Close the AIN2 log file so the recording session
+                    // folder has a complete, flushed labjack_ain2.bin.
+                    lj_trigger.stop_logging();
                     std::cout << "DEBUG SERVER: Broadcasting STOPRECORDING signal to all clients, ptp_stop_time=" << ptp_params->ptp_stop_time << std::endl;
                     fb_builder->Clear();
                     FetchGame::ServerBuilder server_builder(*fb_builder);

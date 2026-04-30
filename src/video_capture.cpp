@@ -6,6 +6,8 @@
 #include "labjack_trigger.h"
 #include "mjpeg_stream.h"
 #include "utils.h"
+#include <chrono>
+#include <thread>
 #include <opencv2/opencv.hpp>
 #ifndef HEADLESS
 #include "FrameDetector.h"
@@ -148,6 +150,36 @@ void show_ptp_offset(PTPState *ptp_state, CameraEmergent *ecam) {
         ptp_state->ptp_offset_prev = ptp_state->ptp_offset;
     }
     printf("Offset Average: %d\n", ptp_state->ptp_offset_sum / 5);
+}
+
+// LJ-edge equivalent of show_ptp_offset: waits for the trigger to advance
+// 5 edges (or 1 s, whichever first) as a proof-of-life that the LabJack
+// stream / ENet broadcasts are flowing. Used in 1:1 LJ mode where PTP is
+// disabled so PtpOffset never updates.
+void show_lj_edge_status(LabJackTrigger *lj_trigger,
+                         const char *cam_serial) {
+    if (!lj_trigger || !lj_trigger->running()) {
+        printf("[LJ %s] trigger not running\n",
+               cam_serial ? cam_serial : "?");
+        return;
+    }
+    uint64_t e0 = lj_trigger->edge_counter();
+    auto t_start = std::chrono::steady_clock::now();
+    uint64_t target = e0 + 5;
+    uint64_t e_now = e0;
+    while (e_now < target) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t_start).count();
+        if (elapsed > 1000) break;
+        usleep(5000);
+        e_now = lj_trigger->edge_counter();
+    }
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t_start).count();
+    printf("[LJ %s] edges %lu -> %lu in %ld ms (%lu new)\n",
+           cam_serial ? cam_serial : "?",
+           (unsigned long)e0, (unsigned long)e_now, (long)elapsed_ms,
+           (unsigned long)(e_now - e0));
 }
 
 void start_ptp_sync(PTPState *ptp_state, PTPParams *ptp_params,
@@ -310,13 +342,23 @@ void start_ptp_sync(PTPState *ptp_state, PTPParams *ptp_params,
         (unsigned int)(ptp_time_plus_delta_to_start & 0xFFFFFFFF);
     ptp_state->ptp_time_plus_delta_to_start_high =
         (unsigned int)(ptp_time_plus_delta_to_start >> 32);
-    EVT_CameraSetUInt32Param(&ecam->camera, "PtpAcquisitionGateTimeHigh",
-                             ptp_state->ptp_time_plus_delta_to_start_high);
-    EVT_CameraSetUInt32Param(&ecam->camera, "PtpAcquisitionGateTimeLow",
-                             ptp_state->ptp_time_plus_delta_to_start_low);
+    // Skip the PTP gate setup in 1:1 LJ-trigger mode — PtpMode is Off there
+    // and the gate-time params would have no effect (or warn). Cross-camera
+    // start alignment is handled by lj_start_edge instead.
+    bool lj_one_to_one = camera_control && camera_control->lj_trigger_mode &&
+                         camera_control->lj_frames_per_edge == 1;
+    if (!lj_one_to_one) {
+        EVT_CameraSetUInt32Param(&ecam->camera, "PtpAcquisitionGateTimeHigh",
+                                 ptp_state->ptp_time_plus_delta_to_start_high);
+        EVT_CameraSetUInt32Param(&ecam->camera, "PtpAcquisitionGateTimeLow",
+                                 ptp_state->ptp_time_plus_delta_to_start_low);
+        printf("PTP Gate time(ns): %llu\n", ptp_time_plus_delta_to_start);
+    } else {
+        printf("[%s] LJ 1:1 mode — skipping PTP gate setup\n",
+               camera_params->camera_serial.c_str());
+    }
     ptp_state->ptp_time_plus_delta_to_start_uint = ptp_time_plus_delta_to_start;
     ptp_state->ptp_time_plus_delta_to_start = ptp_params->ptp_global_time;
-    printf("PTP Gate time(ns): %llu\n", ptp_time_plus_delta_to_start);
 }
 
 void grab_frames_after_countdown(PTPState *ptp_state, CameraEmergent *ecam) {
@@ -405,6 +447,13 @@ inline void get_one_frame(CameraState *camera_state,
             last_lj_edge_ts = ts;
             int n = camera_control->lj_frames_per_edge;
             if (n < 1) n = 1;
+            // Sleep offset_us before firing — schedules the LED to land in
+            // the next flyback after the camera's ~17.5 ms TriggerSoftware
+            // firmware latency. See CameraControl::lj_trigger_offset_us.
+            int offset_us = camera_control->lj_trigger_offset_us;
+            if (offset_us > 0) {
+                std::this_thread::sleep_for(std::chrono::microseconds(offset_us));
+            }
             check_camera_errors(
                 EVT_CameraExecuteCommand(&ecam->camera, "TriggerSoftware"),
                 camera_params->camera_serial.c_str());
@@ -648,8 +697,21 @@ void acquire_frames(CameraEmergent *ecam, CameraParams *camera_params,
         std::cout << "encoder ready\n" << std::endl;
     }
 
+    bool lj_one_to_one = camera_control && camera_control->lj_trigger_mode &&
+                         camera_control->lj_frames_per_edge == 1;
     if (camera_control->sync_camera) {
-        show_ptp_offset(&ptp_state, ecam);
+        if (lj_one_to_one) {
+            // LJ edges replace PTP as the cross-camera sync signal.
+            // show_lj_edge_status proves the LJ stream is flowing, then
+            // start_ptp_sync still runs (just to gate on the GUI Start
+            // Recording button via ptp_counter); the actual frame-0
+            // alignment across cameras is by lj_start_edge in
+            // get_one_frame, not by PTP.
+            show_lj_edge_status(camera_control->lj_trigger,
+                                camera_params->camera_serial.c_str());
+        } else {
+            show_ptp_offset(&ptp_state, ecam);
+        }
         start_ptp_sync(&ptp_state, ptp_params, camera_params, ecam, 3,
                        camera_control, camera_select, &mjpeg_server);
     }
@@ -659,9 +721,16 @@ void acquire_frames(CameraEmergent *ecam, CameraParams *camera_params,
         camera_params->camera_serial.c_str());
 
     if (camera_control->sync_camera) {
-        grab_frames_after_countdown(&ptp_state, ecam);
-        // Countdown done.
-        try_start_timer();
+        if (lj_one_to_one) {
+            // No PTP countdown — the lj_start_edge mechanism in
+            // get_one_frame is the cross-camera barrier. Each camera's
+            // first wait_for_next_edge returns at exactly lj_start_edge
+            // for everyone.
+            try_start_timer();
+        } else {
+            grab_frames_after_countdown(&ptp_state, ecam);
+            try_start_timer();
+        }
     }
     ptp_params->ptp_start_reached = true;
     w.Start();
@@ -683,7 +752,19 @@ void acquire_frames(CameraEmergent *ecam, CameraParams *camera_params,
                       &frame_saver, nullptr, &mjpeg_server);
 #endif
         if (ptp_params->network_sync && ptp_params->network_set_stop_ptp) {
-            if (ptp_state.frame_ts > ptp_params->ptp_stop_time) {
+            // In 1:1 LJ mode, stop immediately on STOPRECORDING — no
+            // PTP-time wait, no edge buffer. ENet broadcast jitter is
+            // sub-ms so cameras stop within ~1 ms of each other; any
+            // last-frame skew is absorbed by the 1:1 lj_edge_index
+            // labeling. In PTP mode, keep the original ptp_stop_time
+            // wait so cameras finish capturing the buffered window.
+            bool stop_now;
+            if (lj_one_to_one) {
+                stop_now = true;
+            } else {
+                stop_now = ptp_state.frame_ts > ptp_params->ptp_stop_time;
+            }
+            if (stop_now) {
                 uint64_t ptp_stop_conuter =
                     sync_fetch_and_add(&ptp_params->ptp_stop_counter, 1);
                 printf("%lu\n", ptp_stop_conuter);

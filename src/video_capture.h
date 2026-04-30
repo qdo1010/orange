@@ -46,6 +46,15 @@ struct CameraControl {
     // wait_for_next_edge returns exactly lj_start_edge for everyone — kills
     // the cross-camera 1-edge labeling race at recording start.
     uint64_t lj_start_edge = 0;
+    // Microseconds to sleep between detecting the LJ falling edge and
+    // calling TriggerSoftware. With PtpMode=Off the actual firmware
+    // latency from TriggerSoftware to shutter open is ~1-2 ms, so an
+    // offset of 0 fires the LED inside the current flyback (0-2.16 ms).
+    // A non-zero offset would push the LED into the scan period AND
+    // stretch the per-frame iteration past one scanner cycle, causing
+    // client cameras to drop every other (or every third) edge because
+    // GetFrame doesn't return in time to wait for the next edge.
+    int lj_trigger_offset_us = 0;
     std::atomic<int> focus_test_generation{0};
     SetFocusRequest setfocus;
 };
@@ -124,6 +133,7 @@ struct PTPState {
 void report_statistics(CameraParams *camera_params, CameraState *camera_state,
                        double time_diff);
 void show_ptp_offset(PTPState *ptp_state, CameraEmergent *ecam);
+void show_lj_edge_status(LabJackTrigger *lj_trigger, const char *cam_serial);
 class MjpegServer; // forward declaration
 void start_ptp_sync(PTPState *ptp_state, PTPParams *ptp_params,
                     CameraParams *camera_params, CameraEmergent *ecam,
