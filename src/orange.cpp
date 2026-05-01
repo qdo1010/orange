@@ -545,6 +545,13 @@ int main(int argc, char **args) {
                         if (lj_trigger.running()) {
                             start_edge = lj_trigger.edge_counter() + 10;
                             camera_control->lj_start_edge = start_edge;
+                            // Save raw AIN2/AIN0 stream alongside the
+                            // recording so we can correlate the analog
+                            // signal (frame clock + IR LED witness) with
+                            // any artifacts post-hoc.
+                            lj_trigger.start_logging(
+                                encoder_config->folder_name +
+                                "/labjack_analog.bin");
                         }
                         host_broadcast_set_start_ptp(
                             fb_builder, &server, ptp_params->ptp_global_time,
@@ -593,6 +600,9 @@ int main(int argc, char **args) {
                     ptp_params->ptp_stop_time =
                         ((unsigned long long)delay_in_second) * 1000000000 +
                         ptp_time;
+                    // Close the AIN2/AIN0 log file so the recording session
+                    // folder has a complete, flushed labjack_analog.bin.
+                    lj_trigger.stop_logging();
                     std::cout << "DEBUG SERVER: Broadcasting STOPRECORDING signal to all clients, ptp_stop_time=" << ptp_params->ptp_stop_time << std::endl;
                     fb_builder->Clear();
                     FetchGame::ServerBuilder server_builder(*fb_builder);
