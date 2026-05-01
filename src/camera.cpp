@@ -605,45 +605,17 @@ void ptp_camera_sync(Emergent::CEmergentCamera *camera,
     check_camera_errors(
         EVT_CameraSetEnumParam(camera, "TriggerSource", "Software"),
         camera_params->camera_serial.c_str());
-    if (frames_per_edge == 1) {
-        // 1:1 mode — Continuous + SoftwareTrigger gives "exactly one frame
-        // per TriggerSoftware". The camera then fires at the actual LJ
-        // edge rate (scanner-locked), not at its internal FrameRate
-        // setpoint. This is what we want for 2P sync — no rolling line
-        // because scanner and IR are slaved to the same clock.
-        check_camera_errors(
-            EVT_CameraSetEnumParam(camera, "AcquisitionMode", "Continuous"),
-            camera_params->camera_serial.c_str());
-    } else {
-        // 1:N mode — burst N frames per LJ edge at the JSON FrameRate.
-        check_camera_errors(
-            EVT_CameraSetEnumParam(camera, "AcquisitionMode", "MultiFrame"),
-            camera_params->camera_serial.c_str());
-        check_camera_errors(
-            EVT_CameraSetUInt32Param(camera, "AcquisitionFrameCount",
-                                     frames_per_edge),
-            camera_params->camera_serial.c_str());
-    }
     check_camera_errors(
-        EVT_CameraSetEnumParam(camera, "TriggerSelector", "FrameStart"),
+        EVT_CameraSetEnumParam(camera, "AcquisitionMode", "MultiFrame"),
+        camera_params->camera_serial.c_str());
+    check_camera_errors(
+        EVT_CameraSetUInt32Param(camera, "AcquisitionFrameCount",
+                                 frames_per_edge),
         camera_params->camera_serial.c_str());
     check_camera_errors(EVT_CameraSetEnumParam(camera, "TriggerMode", "On"),
                         camera_params->camera_serial.c_str());
-    if (frames_per_edge == 1) {
-        // 1:1 mode — disable PTP. With PtpMode=TwoStep + FrameRate=N the
-        // camera locks frames to PTP-disciplined slots at exactly N Hz,
-        // ignoring our actual TriggerSoftware timing — that's what was
-        // causing the rolling line. With PtpMode=Off, each TriggerSoftware
-        // fires the next frame on the camera's free-running clock, so the
-        // LED tracks the LJ edge rate. Cross-camera sync is provided by
-        // the LJ edge mechanism (lj_start_edge + lj_edge_index), not PTP.
-        check_camera_errors(EVT_CameraSetEnumParam(camera, "PtpMode", "Off"),
-                            camera_params->camera_serial.c_str());
-    } else {
-        check_camera_errors(EVT_CameraSetEnumParam(camera, "PtpMode",
-                                                   "TwoStep"),
-                            camera_params->camera_serial.c_str());
-    }
+    check_camera_errors(EVT_CameraSetEnumParam(camera, "PtpMode", "TwoStep"),
+                        camera_params->camera_serial.c_str());
 }
 
 void ptp_sync_off(Emergent::CEmergentCamera *camera,
