@@ -5,6 +5,48 @@ in lockstep with a ScanImage 2-photon microscope. A LabJack T7 reads
 ScanImage's exported frame-clock TTL, and lime fires camera triggers on each
 falling edge so every IR frame is phase-aligned to the microscope.
 
+## Current state (verified 2026-04-30)
+
+End-to-end smoke test passed: 2.66 min recording, 16 cameras across master +
+dosa0 + dosa1, all started on the same LJ edge (169), all stopped within 1
+edge (6546–6547), every camera captured 6378+ consecutive frames with **0**
+non-1-step `lj_edge_index` transitions. PTP-coordinated, locked at exactly
+40.000 Hz internal cadence.
+
+What's confirmed about the rig:
+
+| measurement | value | source |
+|---|---|---|
+| Scanner edge period | 24.99 ms ± 0.03 ms (40.0158 Hz) | AIN2 over 6387 edges |
+| Camera frame period | 25.000 ms ± 0.000 (40.0000 Hz) | AIN0 (LED witness), PTP-disciplined |
+| Flyback width | 2.16 ms (LOW phase) | AIN2 pulse-width |
+| Edge → LED-on latency | mean 17.5 ms ± 0.66 ms | AIN0 vs AIN2, PTP-locked path |
+| LED in flyback | < 5 % | residual artifact, see "Rate lock" below |
+
+Two analog channels are now logged simultaneously:
+- **AIN2** — ScanImage frame clock (drives edge detection)
+- **AIN0** — IR-driver daisy-chain TRIG_OUT (passive witness of when the IR
+  LED actually fires; not used for triggering)
+
+Both go into `labjack_ain2.bin` with a 24-byte header (see "Per-frame
+metadata" → "Analog stream file format" below).
+
+## Known artifact: 40.000 Hz camera vs 40.0158 Hz scanner
+
+In `MultiFrame + PtpMode=TwoStep + FrameRate=40` mode the camera fires at
+exactly 40.000 Hz on its own PTP-disciplined clock — this is independent of
+the scanner's actual 40.0158 Hz. The two rates drift by ~9.66 µs per cycle.
+Over a long recording the IR LED-on phase slides through the 25 ms scanner
+cycle, producing a slow top-to-bottom rolling line in the 2P image when the
+LED leaks into scan period.
+
+This is **accepted as a residual artifact** and corrected post-hoc. The
+AIN2/AIN0 trace makes both rates measurable and the per-edge correlation
+recoverable from `lj_edge_index` in the meta CSVs. Attempts to eliminate
+it from the trigger path (PtpMode=Off, free-run, action triggers) were
+explored and reverted — they introduced more problems than they solved.
+See commit history around `e65e152` for the rationale.
+
 ## Measured rig timing (2026-04-28)
 
 Frame clock on this rig at 40 Hz, measured live with ScanImage running and
@@ -22,26 +64,27 @@ than the 1 ms placeholder I had inferred from the MINI2P paper.) If
 ScanImage settings change — different FOV, zoom, scan rate, MEMS frequency
 — re-measure with `/tmp/lj_plot.py` before recording.
 
-## ⚠️ TODO before first real recording
+## Pre-recording checklist
 
-1. **Set camera `exposure` to fit inside the 2.16 ms flyback.** The mini2p
-   configs currently inherit `"exposure": 250` (µs) — already safe (12 % of
-   the flyback window, ~1.9 ms of margin after exposure ends). You can
-   crank up to ~1500 µs (≈70 % of flyback) for more SNR, or stay at 250
-   µs for a generous safety margin. To bulk-edit:
+1. **Camera `exposure`.** The mini2p_40hz configs are at `"exposure": 100`
+   (µs). To bulk-edit across all 3 mounts:
    ```bash
-   # on each machine (master + vlan-dosa0 + vlan-dosa1)
-   sed -i 's/"exposure": [0-9]*/"exposure": <NEW_US>/' \
-     /home/ratan/orange_data/config/network/mini2p_*/*.json
+   find /home/ratan/orange_data{,_dosa0,_dosa1}/config/network/mini2p_40hz \
+        -name "*.json" \
+        -exec sed -i 's/"exposure": [0-9]*/"exposure": <NEW_US>/' {} +
    ```
 2. **Confirm the 2P PMT optics include an IR-blocking filter** before using
    1:2 / 1:4 modes (see "IR rate: 1:N modes" below). If the filter isn't
    confirmed, stay on 1:1.
-3. **Click "Search for LabJack" BEFORE clicking "Open Cameras".** The LJ
-   mode flag is latched at the OPENCAMERA broadcast moment, so a Search
-   click after Open Cameras has no effect this session — you'd record a
-   PTP-only run with `lj_edge_index=0` throughout. The Search button
-   intentionally disables once cameras are open as a hint.
+3. **Click "Search for LabJack" BEFORE clicking "Open Cameras"** (or pass
+   `--lj-trigger` at startup). The LJ mode flag is latched at the OPENCAMERA
+   broadcast moment, so a Search click after Open Cameras has no effect
+   this session — you'd record a PTP-only run with `lj_edge_index=0`
+   throughout.
+4. **Wire AIN0 (optional but recommended).** Tap the IR-driver daisy-chain
+   `TRIG_OUT` (the unused BNC at the end of the daisy chain) into T7 AIN0.
+   Lime auto-streams both AIN2 and AIN0; AIN0 is logged but doesn't drive
+   triggering. See "Hardware setup" below.
 
 ## At a glance
 
@@ -157,6 +200,30 @@ Both `lj_edge_*` columns are 0 for frames acquired with LJ trigger disabled.
 
 Use `lj_edge_index` for post-hoc alignment to ScanImage frames — frame N of
 ScanImage corresponds to all rows in the IR meta CSV with `lj_edge_index == N`.
+
+### Analog stream file format (`labjack_ain2.bin`)
+
+The session folder also contains `labjack_ain2.bin` — the raw AIN2 + AIN0
+samples streamed during the recording. It's used for offline correlation
+of the IR LED firing relative to the scanner edge.
+
+24-byte header followed by interleaved float64 samples (channels in scan
+order, AIN2 first then AIN0):
+
+| offset | type | field |
+|---|---|---|
+| 0  | uint64 | `start_ns` (host CLOCK_REALTIME at start of logging) |
+| 8  | double | `rate_hz` (typically 10000.0) |
+| 16 | uint32 | `num_channels` (currently 2 = AIN2, AIN0) |
+| 20 | uint32 | reserved (zero) |
+
+After the header: `(N_samples × num_channels)` float64 values, each scan's
+`num_channels` samples adjacent. Channel order matches `scan_list` in
+`labjack_trigger.cpp`: index 0 = AIN2 (frame clock), index 1 = AIN0 (IR
+daisy-chain witness).
+
+Loader: `/tmp/lj_load.py` — handles both this 24-byte format and the
+older 16-byte single-channel format.
 
 ### Analysis: how to pair IR frames in this metadata
 
@@ -349,10 +416,17 @@ current at trigger time.
 
 1. ScanImage exported frame-clock BNC → LabJack T7 **AIN2 + GND**. The signal
    is ~5V TTL; AIN2 default range is ±10V so it's fine. Threshold for edge
-   detection is hardcoded at 2.5 V (see `THRESH` in `src/labjack_trigger.cpp`).
-2. T7 connected to dosa-live over USB. Confirmed serial: 470033341 (LJM driver
+   detection is hardcoded at 2.5 V (see `threshold_v` in `src/labjack_trigger.cpp`).
+2. **(Optional)** IR-driver daisy-chain `TRIG_OUT` → T7 **AIN0 + GND**. The
+   IR strobe boards are daisy-chained (one camera's GPO drives `TRIG_IN` of
+   the first board; each board passes the trigger downstream). The unused
+   `TRIG_OUT` BNC at the end of the chain is a witness of when the LED
+   actually fires. Lime streams AIN0 alongside AIN2 and writes both into
+   `labjack_ain2.bin`; AIN0 is logged but never drives triggering. If you
+   skip this wiring, AIN0 will record as flat noise and that's fine.
+3. T7 connected to dosa-live over USB. Confirmed serial: 470033341 (LJM driver
    at `/usr/local/lib/libLabJackM.so.1.20.1`).
-3. The 16 cameras are wired and reachable on the camera VLAN as before — no
+4. The 16 cameras are wired and reachable on the camera VLAN as before — no
    new wiring needed for this integration.
 
 ## File map
@@ -500,11 +574,22 @@ this order — each is independent.
 ## Known gotchas / future work
 
 - **PMT IR filter**: confirm whether the 2P PMT optics filter the IR
-  wavelength before running 1:N modes (see "IR rate" section).
-- **Flyback duration is not measured** — the docs assume ~1 ms based on the
-  MINI2P paper but this is rig-specific and we should measure with
-  `/tmp/lj_edges` or `/tmp/lj_plot.py` (small scratch tools that stream AIN2
-  and report LOW/HIGH/PERIOD pulse widths).
+  wavelength before running 1:N modes (see "IR rate" section). A
+  700 SP / 750 SP short-pass filter at the PMT is the standard fix.
+- **Flyback duration**: measured at **2.16 ms** on this rig (40 Hz frame
+  clock). Re-measure with `/tmp/lj_replot.py` if ScanImage settings
+  change (FOV, zoom, scan rate, MEMS frequency).
+- **Camera fires at 40.000 Hz, scanner at 40.0158 Hz** — known drift
+  (~9.66 µs/cycle). PTP-disciplined camera clock locks to FrameRate,
+  doesn't track scanner exactly. Manifests as a slowly-rolling line in
+  the 2P image when the IR LED leaks into scan period. Mitigation:
+  short-pass filter at PMT (see above).
+- **Stop Recording fallback**: the camera worker breaks out 3 s after
+  Stop press regardless of whether LJ edges are still flowing. This
+  guards against a hang if the scanner is turned off (or the BNC pulled)
+  before recording is stopped — without the fallback, frame_ts wouldn't
+  advance past ptp_stop_time and the camera worker would spin forever.
+  See `video_capture.cpp` around the `network_set_stop_ptp` block.
 - **Rig folder ↔ IR-rate dropdown must match**. The rig JSON has a baked-in
   `frame_rate`; the IR rate dropdown sets the burst size N. They must
   agree (`mini2p_40hz` ↔ 1:1, `mini2p_80hz` ↔ 1:2, `mini2p_160hz` ↔ 1:4)

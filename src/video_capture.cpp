@@ -683,7 +683,34 @@ void acquire_frames(CameraEmergent *ecam, CameraParams *camera_params,
                       &frame_saver, nullptr, &mjpeg_server);
 #endif
         if (ptp_params->network_sync && ptp_params->network_set_stop_ptp) {
-            if (ptp_state.frame_ts > ptp_params->ptp_stop_time) {
+            // Snapshot host CLOCK_REALTIME on the first iteration where
+            // network_set_stop_ptp is true. Used as a fallback deadline if
+            // LJ edges have stopped flowing (e.g., scanner off, T7
+            // disconnected) — without this, frame_ts would never advance
+            // past ptp_stop_time and the camera worker would hang in the
+            // wait_for_next_edge timeout loop forever.
+            static thread_local bool stop_seen_local = false;
+            static thread_local uint64_t stop_host_ns_local = 0;
+            if (!stop_seen_local) {
+                stop_seen_local = true;
+                struct timespec ts_now;
+                clock_gettime(CLOCK_REALTIME, &ts_now);
+                stop_host_ns_local =
+                    (uint64_t)ts_now.tv_sec * 1000000000ull + ts_now.tv_nsec;
+            }
+            bool by_frame = ptp_state.frame_ts > ptp_params->ptp_stop_time;
+            bool by_timeout = false;
+            {
+                struct timespec ts_now;
+                clock_gettime(CLOCK_REALTIME, &ts_now);
+                uint64_t now_ns =
+                    (uint64_t)ts_now.tv_sec * 1000000000ull + ts_now.tv_nsec;
+                // Same 3s window the existing PTP path uses (delay_in_second
+                // in orange.cpp). Just measured against host wall-clock so
+                // it fires even if no fresh frames arrive.
+                by_timeout = (now_ns - stop_host_ns_local) > 3000000000ull;
+            }
+            if (by_frame || by_timeout) {
                 uint64_t ptp_stop_conuter =
                     sync_fetch_and_add(&ptp_params->ptp_stop_counter, 1);
                 printf("%lu\n", ptp_stop_conuter);
