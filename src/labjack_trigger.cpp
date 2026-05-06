@@ -110,6 +110,16 @@ LabJackTrigger::~LabJackTrigger() { stop(); }
 bool LabJackTrigger::start(double scan_rate_hz, double threshold_v) {
     if (running_.load()) return true;
 
+    // Reset state on fresh connect — don't carry edge counts or queued
+    // pending edges across disconnect/reconnect cycles. Each Search →
+    // start() should give the GUI a clean "edges seen: 0" baseline.
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        edge_counter_ = 0;
+        edge_timestamp_ns_ = 0;
+        pending_.clear();
+    }
+
     int err = LJM_Open(LJM_dtT7, LJM_ctANY, "ANY", &handle_);
     if (err) {
         log_ljm_err(err, "LJM_Open");

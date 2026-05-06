@@ -161,8 +161,28 @@ int main(int argc, char **args) {
     std::thread detection3d_thread;
     bool show_error = false;
     std::string error_message;
+    // Auto-disconnect LJ after Stop Recording so the GUI shows a clean
+    // "(disconnected)" + edge counter resets to 0 on next Search. Set on
+    // Stop press, fired in the main loop after the camera drain window
+    // (existing 3 s + 1 s buffer = 4 s).
+    bool lj_disconnect_pending = false;
+    uint64_t lj_disconnect_at_ns = 0;
     while (!glfwWindowShouldClose(window->render_target)) {
         create_new_frame();
+        // Fire deferred LJ disconnect (scheduled from Stop Recording).
+        if (lj_disconnect_pending && lj_trigger.running()) {
+            struct timespec ts_now;
+            clock_gettime(CLOCK_REALTIME, &ts_now);
+            uint64_t now_ns = (uint64_t)ts_now.tv_sec * 1000000000ull +
+                              ts_now.tv_nsec;
+            if (now_ns >= lj_disconnect_at_ns) {
+                lj_trigger.stop();
+                lj_disconnect_pending = false;
+                fprintf(stderr,
+                        "[LJ] auto-disconnected after Stop Recording; "
+                        "edge counter reset, ready for next Search\n");
+            }
+        }
         if (ImGui::Begin("Network")) {
             if (ImGui::BeginTable("##Local Apps", 2,
                                   ImGuiTableFlags_Resizable |
@@ -603,6 +623,17 @@ int main(int argc, char **args) {
                     // Close the AIN2/AIN0 log file so the recording session
                     // folder has a complete, flushed labjack_analog.bin.
                     lj_trigger.stop_logging();
+                    // Schedule LJ disconnect after the camera drain window.
+                    // Cameras need LJ alive for ~3 s to capture their final
+                    // frames cleanly; we wait an extra 1 s buffer past that.
+                    if (lj_trigger.running()) {
+                        struct timespec ts_now;
+                        clock_gettime(CLOCK_REALTIME, &ts_now);
+                        lj_disconnect_at_ns =
+                            (uint64_t)ts_now.tv_sec * 1000000000ull +
+                            ts_now.tv_nsec + 4000000000ull;
+                        lj_disconnect_pending = true;
+                    }
                     std::cout << "DEBUG SERVER: Broadcasting STOPRECORDING signal to all clients, ptp_stop_time=" << ptp_params->ptp_stop_time << std::endl;
                     fb_builder->Clear();
                     FetchGame::ServerBuilder server_builder(*fb_builder);
