@@ -268,6 +268,11 @@ inline void set_camera_properties(CameraEmergent *ecams,
                    "Default is set to 1 second.");
 
         input_text("YOLO", cameras_select->yolo_model);
+        ImGui::Checkbox("JARVIS 3D Pose", &cameras_select->enable_jarvis);
+        ImGui::SameLine();
+        HelpMarker("Run JARVIS HybridNet 3D pose on this camera. Enable on all "
+                   "rig cameras, set JARVIS_MODEL_DIR/JARVIS_CALIB_DIR env, then "
+                   "subscribe. Needs >=2 cameras enabled.");
         ImGui::Checkbox("GPU Direct",
                         &cameras_params[selected_camera].gpu_direct);
         ImGui::Checkbox("Color", &cameras_params[selected_camera].color);

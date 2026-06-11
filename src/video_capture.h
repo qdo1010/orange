@@ -63,6 +63,10 @@ struct CameraEachSelect {
     int total_standoff_detector = 0;
     std::atomic<PictureState> frame_detect_state;
     
+    // JARVIS 3D pose: per-camera opt-in (set in Camera Property before
+    // subscribe; the pose runner inits from the cameras flagged here).
+    bool enable_jarvis = false;
+
     // OBB Detection Configuration
     bool enable_obb = false;
     std::string obb_csv_path = "";

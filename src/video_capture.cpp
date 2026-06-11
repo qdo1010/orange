@@ -449,7 +449,7 @@ inline void get_one_frame(CameraState *camera_state,
         // JARVIS 3D pose: hand this camera's RGBA device frame to the shared
         // runner (lime-agnostic; runs the distributed pipeline on its own
         // worker when all cameras for this frame have arrived). See src/jarvis/.
-        if (camera_select->detect_mode == Pose3D_Jarvis &&
+        if (camera_select->enable_jarvis &&
             jarvis::shared_runner().ready()) {
             jarvis::shared_runner().submit_by_serial(
                 camera_params->camera_serial,

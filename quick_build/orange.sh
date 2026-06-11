@@ -7,6 +7,7 @@ targets_folder=$PARENT_DIR/targets
 mkdir -p $targets_folder
 rm -f $targets_folder/orange
 nvcc -c src/kernel.cu -arch=sm_80 -o $targets_folder/kernel.o
+nvcc -c src/jarvis/jarvis_cuda.cu -std=c++17 -arch=sm_80 -I/usr/local/cuda/include -o $targets_folder/jarvis_cuda.o
 
 DIR_FFMPEG=$HOME/nvidia/ffmpeg
 DIR_TENSORRT=$HOME/nvidia/TensorRT
@@ -32,7 +33,8 @@ g++ -std=c++17 -I$DIR_IMPLOT -I$DIR_IMGUI -g -Wall -c -o $targets_folder/implot_
 g++ -std=c++17 -I$DIR_FILEBROWSER -I$DIR_IMGUI -g -Wall -c -o $targets_folder/ImGuiFileDialog.o $DIR_FILEBROWSER/ImGuiFileDialog.cpp
 
 g++ -Ofast -ffast-math -std=c++17 $targets_folder/*.o \
-    -o $targets_folder/orange -I ./src/ src/orange.cpp src/project.cpp src/FrameSaver.cpp src/FrameDetector.cpp src/realtime_tool.cpp src/detect3d.cpp src/network_base.cpp src/global.cpp src/FFmpegWriter.cpp src/camera.cpp src/video_capture.cpp src/offthreadmachine.cpp src/opengldisplay.cpp src/threadworker.cpp src/gpu_video_encoder.cpp src/yolov8_det.cpp src/obb_detector.cpp \
+    -o $targets_folder/orange -I ./src/ src/orange.cpp src/project.cpp src/FrameSaver.cpp src/FrameDetector.cpp src/realtime_tool.cpp src/detect3d.cpp src/network_base.cpp src/global.cpp src/FFmpegWriter.cpp src/camera.cpp src/video_capture.cpp src/offthreadmachine.cpp src/opengldisplay.cpp src/threadworker.cpp src/gpu_video_encoder.cpp src/yolov8_det.cpp src/obb_detector.cpp src/jarvis/jarvis_calib.cpp src/jarvis/jarvis_runner.cpp \
+    -I/usr/include/eigen3 \
     -I$DIR_IMGUI \
     -I$DIR_IMGUI_BACKEND \
     -I$DIR_IMPLOT \

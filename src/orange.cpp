@@ -340,7 +340,7 @@ int main(int argc, char **args) {
                             const char *cdir = std::getenv("JARVIS_CALIB_DIR");
                             std::vector<std::string> jserials; std::vector<int> jgpus;
                             for (int i = 0; i < num_cameras; i++)
-                                if (cameras_select[i].detect_mode == Pose3D_Jarvis) {
+                                if (cameras_select[i].enable_jarvis) {
                                     jserials.push_back(cameras_params[i].camera_serial);
                                     jgpus.push_back(cameras_params[i].gpu_id);
                                 }
