@@ -327,7 +327,15 @@ public:
               int central_gpu) {
         if (!load_manifest(cfg_, (std::filesystem::path(model_dir) / "manifest.json").string()))
             return false;
-        cfg_.num_cameras = (int)cams.size();
+        // hybrid3d's camera axis is baked into the ONNX at the model's camera
+        // count — enabling a different number of cameras can't work.
+        if ((int)cams.size() != cfg_.num_cameras) {
+            std::fprintf(stderr,
+                "[jarvis] model expects exactly %d cameras but %d were enabled — "
+                "enable JARVIS on exactly the %d calibrated rig cameras.\n",
+                cfg_.num_cameras, (int)cams.size(), cfg_.num_cameras);
+            return false;
+        }
         cams_ = cams;
         cam2d_.resize(cams.size());
         for (size_t c = 0; c < cams.size(); ++c)

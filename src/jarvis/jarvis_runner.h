@@ -57,6 +57,15 @@ public:
     // Thread-safe snapshot of the most recent completed result.
     PoseResult latest() const;
 
+    // Reproject the latest 3D keypoints to camera `serial`'s image (full
+    // pinhole + distortion). uv_out = [u0,v0,u1,v1,...] in image pixels (origin
+    // top-left); conf_out = per-keypoint confidence. Returns false if the serial
+    // isn't a JARVIS camera or there's no valid result yet. Lets lime overlay
+    // the pose on whichever camera(s) it streams.
+    bool reproject_latest(const std::string &serial,
+                          std::vector<float> &uv_out,
+                          std::vector<float> &conf_out) const;
+
     bool ready() const { return loaded_; }
     const Config &config() const { return cfg_; }
     void stop();
@@ -68,6 +77,7 @@ private:
     int n_ = 0;
     Config cfg_;
     PoseCoordinator coord_;
+    std::vector<CameraParams> cams_;   // calib per camera (for reprojection)
 
     // Staging for the in-progress frame set.
     std::mutex mtx_;

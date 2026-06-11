@@ -1472,6 +1472,9 @@ int main(int argc, char **args) {
                                 }
                             }
 
+                            draw_jarvis_pose(cameras_params[i].camera_serial,
+                                             cameras_params[i].height, i);
+
                             ImPlot::EndPlot();
                         }
                         ImGui::End();
@@ -1542,6 +1545,9 @@ int main(int argc, char **args) {
                                         8.0);
                                 }
                             }
+
+                            draw_jarvis_pose(cameras_params[i].camera_serial,
+                                             cameras_params[i].height, i);
 
                             ImPlot::EndPlot();
                         }

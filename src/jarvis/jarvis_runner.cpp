@@ -22,6 +22,7 @@ bool JarvisPoseRunner::init(const std::string &model_dir, const std::string &cal
     for (int c = 0; c < n_; ++c) cams[c].gpu_id = cam_gpus[c];
     if (!coord_.load(model_dir, cams, central_gpu)) return false;
     cfg_ = coord_.config();
+    cams_ = cams;
 
     rgba_.assign(n_, nullptr);
     w_.assign(n_, 0); h_.assign(n_, 0);
@@ -82,6 +83,31 @@ void JarvisPoseRunner::worker_loop() {
 PoseResult JarvisPoseRunner::latest() const {
     std::lock_guard<std::mutex> rl(result_mtx_);
     return result_;
+}
+
+bool JarvisPoseRunner::reproject_latest(const std::string &serial,
+                                        std::vector<float> &uv_out,
+                                        std::vector<float> &conf_out) const {
+    if (!loaded_) return false;
+    auto it = serial_to_idx_.find(serial);
+    if (it == serial_to_idx_.end()) return false;
+    const CameraParams &cp = cams_[it->second];
+    PoseResult r;
+    { std::lock_guard<std::mutex> rl(result_mtx_); r = result_; }
+    if (!r.valid) return false;
+    const int J = cfg_.num_joints;
+    uv_out.resize(J * 2);
+    conf_out.resize(J);
+    for (int j = 0; j < J; ++j) {
+        Eigen::Vector3d P(r.points3D[j*3+0], r.points3D[j*3+1], r.points3D[j*3+2]);
+        Eigen::Vector2d uv = cp.telecentric
+            ? red_math::projectPointTelecentric(P, cp.projection_mat, cp.k, cp.dist_coeffs)
+            : red_math::projectPointR(P, cp.r, cp.tvec, cp.k, cp.dist_coeffs);
+        uv_out[j*2+0] = (float)uv[0];
+        uv_out[j*2+1] = (float)uv[1];
+        conf_out[j] = r.confidences[j];
+    }
+    return true;
 }
 
 void JarvisPoseRunner::stop() {

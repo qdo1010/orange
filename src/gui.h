@@ -8,6 +8,7 @@
 #include "imgui.h"
 #include "realtime_tool.h"
 #include "video_capture.h"
+#include "jarvis/jarvis_runner.h"
 #include <math.h>
 #include <thread>
 
@@ -478,6 +479,39 @@ inline void draw_ball_center(cv::Point2f ball_center, int frame_height,
     double ball_center_y = (double)frame_height - (double)ball_center.y;
     ImPlot::SetNextMarkerStyle(marker, pt_size, color, 2.5);
     ImPlot::PlotScatter(name.c_str(), &ball_center_x, &ball_center_y, 1);
+}
+
+// Overlay the latest JARVIS 3D pose on camera `serial`'s ImPlot view (the 3D
+// keypoints reprojected to this camera, with the skeleton). No-op unless this
+// is a JARVIS camera with a valid result. Call inside the camera's BeginPlot,
+// after the image is plotted. Drawn in image coords (y flipped, like
+// draw_ball_center) since the plot axes are set to image pixels.
+inline void draw_jarvis_pose(const std::string &serial, int frame_height,
+                             int cam_idx) {
+    if (!jarvis::shared_runner().ready()) return;
+    std::vector<float> uv, conf;
+    if (!jarvis::shared_runner().reproject_latest(serial, uv, conf)) return;
+    const int J = (int)conf.size();
+    // mouse_merge_6kp skeleton: Snout-EarL, Snout-EarR, EarL-Neck, EarR-Neck,
+    // Neck-SpineL, SpineL-TailBase.
+    static const int edges[6][2] = {{0,1},{0,2},{1,3},{2,3},{3,4},{4,5}};
+    for (int e = 0; e < 6; ++e) {
+        if (edges[e][0] >= J || edges[e][1] >= J) continue;
+        double xs[2] = {uv[edges[e][0]*2], uv[edges[e][1]*2]};
+        double ys[2] = {(double)frame_height - uv[edges[e][0]*2+1],
+                        (double)frame_height - uv[edges[e][1]*2+1]};
+        ImPlot::SetNextLineStyle(ImVec4(0.95f, 0.85f, 0.2f, 0.9f), 2.0f);
+        std::string nm = "jsk" + std::to_string(cam_idx) + "_" + std::to_string(e);
+        ImPlot::PlotLine(nm.c_str(), xs, ys, 2);
+    }
+    for (int j = 0; j < J; ++j) {
+        cv::Point2f p(uv[j*2], uv[j*2+1]);
+        ImVec4 col = (ImVec4)ImColor::HSV((float)j / (float)std::max(1, J),
+                                          0.9f, 1.0f);
+        draw_ball_center(p, frame_height, col,
+                         "jkp" + std::to_string(cam_idx) + "_" + std::to_string(j),
+                         ImPlotMarker_Circle, 6.0f);
+    }
 }
 
 inline void draw_box(cv::Rect_<float> bbox, int frame_height, ImVec4 color, std::string name, ImPlotMarker marker, float pt_size) {
