@@ -9,6 +9,7 @@ namespace jarvis {
 bool JarvisPoseRunner::init(const std::string &model_dir, const std::string &calib_dir,
                             const std::vector<std::string> &serials,
                             const std::vector<int> &cam_gpus, int central_gpu) {
+    if (loaded_) return true;   // idempotent: safe to call from multiple sites
     n_ = (int)serials.size();
     if (n_ < 2 || (int)cam_gpus.size() != n_) {
         std::fprintf(stderr, "[jarvis-runner] need >=2 cams and matching gpu list\n");

@@ -275,6 +275,22 @@ inline void set_camera_properties(CameraEmergent *ecams,
                    "(exactly 4) rig cameras, set the model/calib folders below, "
                    "then open cameras. The pose overlays on whichever camera "
                    "you stream.");
+        // Live status — how you know JARVIS is running.
+        if (jarvis::shared_runner().ready()) {
+            jarvis::PoseResult jr = jarvis::shared_runner().latest();
+            if (jr.valid)
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f),
+                    "JARVIS running: %d cams used, %.0f ms (~%.0f fps), frame %llu",
+                    jr.cams_used, jr.latency_ms,
+                    jr.latency_ms > 0 ? 1000.0 / jr.latency_ms : 0.0,
+                    (unsigned long long)jr.frame_id);
+            else
+                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.2f, 1.0f),
+                    "JARVIS loaded, waiting for first detection...");
+        } else {
+            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1.0f),
+                "JARVIS not loaded (open cameras with the 4 enabled).");
+        }
         // Global JARVIS folders (model engines + per-camera calibration).
         // Editable here, preset to defaults; read at camera-open. Env vars
         // JARVIS_MODEL_DIR / JARVIS_CALIB_DIR override if set.

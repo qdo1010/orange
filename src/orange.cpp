@@ -38,6 +38,42 @@ static std::vector<RemoteCamInfo> g_remote_cams;
 
 #define display_gpu_id 0
 
+// JARVIS 3D pose: init the shared runner from the cameras flagged enable_jarvis.
+// Idempotent (safe to call from every camera-open path). Model/calib folders +
+// central GPU come from the GUI globals (preset, editable in "JARVIS 3D Pose
+// Settings"); env vars override if set.
+static void jarvis_try_init(CameraParams *cameras_params,
+                            CameraEachSelect *cameras_select, int num_cameras) {
+    if (jarvis::shared_runner().ready()) return;
+    std::string mdir = jarvis_model_dir;
+    std::string cdir = jarvis_calib_dir;
+    int central = jarvis_central_gpu;
+    if (const char *e = std::getenv("JARVIS_MODEL_DIR")) mdir = e;
+    if (const char *e = std::getenv("JARVIS_CALIB_DIR")) cdir = e;
+    if (const char *e = std::getenv("JARVIS_CENTRAL_GPU")) central = std::atoi(e);
+    std::vector<std::string> jserials;
+    std::vector<int> jgpus;
+    for (int i = 0; i < num_cameras; i++)
+        if (cameras_select[i].enable_jarvis) {
+            jserials.push_back(cameras_params[i].camera_serial);
+            jgpus.push_back(cameras_params[i].gpu_id);
+        }
+    if (jserials.empty()) return;
+    std::cout << "[jarvis] init: " << jserials.size()
+              << " enabled cams, model=" << mdir << std::endl;
+    if (mdir.empty() || cdir.empty() || jserials.size() < 2) {
+        std::cerr << "[jarvis] init skipped: need model+calib dirs and >=2 cams"
+                  << std::endl;
+        return;
+    }
+    if (central < 0) { int ng = 0; cudaGetDeviceCount(&ng); central = ng - 1; }
+    if (jarvis::shared_runner().init(mdir, cdir, jserials, jgpus, central))
+        std::cout << "[jarvis] pose runner: " << jserials.size()
+                  << " cams, central GPU " << central << std::endl;
+    else
+        std::cerr << "[jarvis] pose runner init FAILED" << std::endl;
+}
+
 int main(int argc, char **args) {
     ck(cudaSetDevice(display_gpu_id));
 
@@ -328,34 +364,7 @@ int main(int argc, char **args) {
                                 &cameras_params[i]);
                         }
 
-                        // JARVIS 3D pose (Option B distributed): load the
-                        // pipeline once for cameras with enable_jarvis. Model +
-                        // calib folders come from the GUI fields (globals, preset
-                        // to defaults, editable in "JARVIS 3D Pose Settings");
-                        // env vars JARVIS_MODEL_DIR / JARVIS_CALIB_DIR /
-                        // JARVIS_CENTRAL_GPU override if set.
-                        {
-                            std::string mdir = jarvis_model_dir;
-                            std::string cdir = jarvis_calib_dir;
-                            int central = jarvis_central_gpu;
-                            if (const char *e = std::getenv("JARVIS_MODEL_DIR")) mdir = e;
-                            if (const char *e = std::getenv("JARVIS_CALIB_DIR")) cdir = e;
-                            if (const char *e = std::getenv("JARVIS_CENTRAL_GPU")) central = std::atoi(e);
-                            std::vector<std::string> jserials; std::vector<int> jgpus;
-                            for (int i = 0; i < num_cameras; i++)
-                                if (cameras_select[i].enable_jarvis) {
-                                    jserials.push_back(cameras_params[i].camera_serial);
-                                    jgpus.push_back(cameras_params[i].gpu_id);
-                                }
-                            if (!mdir.empty() && !cdir.empty() && jserials.size() >= 2) {
-                                if (central < 0) { int ng = 0; cudaGetDeviceCount(&ng); central = ng - 1; }
-                                if (jarvis::shared_runner().init(mdir, cdir, jserials, jgpus, central))
-                                    std::cout << "[jarvis] pose runner: " << jserials.size()
-                                              << " cams, central GPU " << central << std::endl;
-                                else
-                                    std::cerr << "[jarvis] pose runner init FAILED" << std::endl;
-                            }
-                        }
+                        jarvis_try_init(cameras_params, cameras_select, num_cameras);
 
                         realtime_plot_data = new ScrollingBuffer[num_cameras];
                     }
@@ -1196,6 +1205,7 @@ int main(int argc, char **args) {
                                     &cameras_params[i]);
                             }
                         }
+                        jarvis_try_init(cameras_params, cameras_select, num_cameras);
                         realtime_plot_data = new ScrollingBuffer[num_cameras];
                     }
                 } else {
