@@ -329,24 +329,25 @@ int main(int argc, char **args) {
                         }
 
                         // JARVIS 3D pose (Option B distributed): load the
-                        // pipeline once for cameras opted in via Pose3D_Jarvis.
-                        // Paths from env so no config-schema change is needed:
-                        //   JARVIS_MODEL_DIR  = dir with *.engine + manifest.json
-                        //   JARVIS_CALIB_DIR  = dir with Cam<serial>.yaml (read
-                        //                       fresh — rig re-calibrates daily)
-                        //   JARVIS_CENTRAL_GPU= GPU for the 3D stage (default:
-                        //                       highest-index GPU, e.g. the A6000)
-                        if (const char *mdir = std::getenv("JARVIS_MODEL_DIR")) {
-                            const char *cdir = std::getenv("JARVIS_CALIB_DIR");
+                        // pipeline once for cameras with enable_jarvis. Model +
+                        // calib folders come from the GUI fields (globals, preset
+                        // to defaults, editable in "JARVIS 3D Pose Settings");
+                        // env vars JARVIS_MODEL_DIR / JARVIS_CALIB_DIR /
+                        // JARVIS_CENTRAL_GPU override if set.
+                        {
+                            std::string mdir = jarvis_model_dir;
+                            std::string cdir = jarvis_calib_dir;
+                            int central = jarvis_central_gpu;
+                            if (const char *e = std::getenv("JARVIS_MODEL_DIR")) mdir = e;
+                            if (const char *e = std::getenv("JARVIS_CALIB_DIR")) cdir = e;
+                            if (const char *e = std::getenv("JARVIS_CENTRAL_GPU")) central = std::atoi(e);
                             std::vector<std::string> jserials; std::vector<int> jgpus;
                             for (int i = 0; i < num_cameras; i++)
                                 if (cameras_select[i].enable_jarvis) {
                                     jserials.push_back(cameras_params[i].camera_serial);
                                     jgpus.push_back(cameras_params[i].gpu_id);
                                 }
-                            if (cdir && jserials.size() >= 2) {
-                                int central = std::getenv("JARVIS_CENTRAL_GPU")
-                                    ? std::atoi(std::getenv("JARVIS_CENTRAL_GPU")) : -1;
+                            if (!mdir.empty() && !cdir.empty() && jserials.size() >= 2) {
                                 if (central < 0) { int ng = 0; cudaGetDeviceCount(&ng); central = ng - 1; }
                                 if (jarvis::shared_runner().init(mdir, cdir, jserials, jgpus, central))
                                     std::cout << "[jarvis] pose runner: " << jserials.size()

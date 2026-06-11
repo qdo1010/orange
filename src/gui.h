@@ -272,8 +272,27 @@ inline void set_camera_properties(CameraEmergent *ecams,
         ImGui::Checkbox("JARVIS 3D Pose", &cameras_select->enable_jarvis);
         ImGui::SameLine();
         HelpMarker("Run JARVIS HybridNet 3D pose on this camera. Enable on all "
-                   "rig cameras, set JARVIS_MODEL_DIR/JARVIS_CALIB_DIR env, then "
-                   "subscribe. Needs >=2 cameras enabled.");
+                   "(exactly 4) rig cameras, set the model/calib folders below, "
+                   "then open cameras. The pose overlays on whichever camera "
+                   "you stream.");
+        // Global JARVIS folders (model engines + per-camera calibration).
+        // Editable here, preset to defaults; read at camera-open. Env vars
+        // JARVIS_MODEL_DIR / JARVIS_CALIB_DIR override if set.
+        if (ImGui::CollapsingHeader("JARVIS 3D Pose Settings")) {
+            input_text("Model dir", jarvis_model_dir);
+            ImGui::SameLine();
+            HelpMarker("Folder with center_detect/hybridnet_efftrack/hybrid3d "
+                       ".engine files + manifest.json (use the FP16 build for "
+                       "speed). Compile engines per-rig at BATCH=1.");
+            input_text("Calib dir", jarvis_calib_dir);
+            ImGui::SameLine();
+            HelpMarker("Folder with Cam<serial>.yaml calibration (read fresh at "
+                       "open — re-calibrate daily and just drop the new files in).");
+            ImGui::InputInt("Central GPU", &jarvis_central_gpu);
+            ImGui::SameLine();
+            HelpMarker("GPU that runs the 3D stage + gathers heatmaps (the "
+                       "A6000). Per-camera 2D runs on each camera's own GPU.");
+        }
         ImGui::Checkbox("GPU Direct",
                         &cameras_params[selected_camera].gpu_direct);
         ImGui::Checkbox("Color", &cameras_params[selected_camera].color);

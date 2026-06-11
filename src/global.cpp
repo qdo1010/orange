@@ -1,5 +1,11 @@
 #include "global.h"
 
+std::string jarvis_model_dir =
+    "/home/ratan/src/realtime_jarvis_model/mouse_merge_6kp/onnx_fp16";
+std::string jarvis_calib_dir =
+    "/home/ratan/src/realtime_jarvis_model/calibration";
+int jarvis_central_gpu = 4;
+
 std::mutex mtx3d;
 std::condition_variable cv3d;
 std::atomic<double> streaming_fps = 0.0;

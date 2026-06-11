@@ -5,6 +5,13 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <string>
+
+// JARVIS 3D pose: editable in the GUI (folder fields), preset to defaults.
+// Read at camera-open to init the pose runner. Env vars override if set.
+extern std::string jarvis_model_dir;   // dir with *.engine + manifest.json
+extern std::string jarvis_calib_dir;   // dir with Cam<serial>.yaml
+extern int jarvis_central_gpu;         // GPU for the 3D stage (A6000)
 
 extern std::atomic<double> streaming_fps;
 extern std::atomic<int> streaming_target_fps;
