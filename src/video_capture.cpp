@@ -5,6 +5,7 @@
 #include "gpu_video_encoder.h"
 #include "mjpeg_stream.h"
 #include "utils.h"
+#include "jarvis/jarvis_runner.h"
 #include <opencv2/opencv.hpp>
 #ifndef HEADLESS
 #include "FrameDetector.h"
@@ -444,6 +445,18 @@ inline void get_one_frame(CameraState *camera_state,
             detector->notify_frame_ready(ecam->frame_recv.imagePtr, 0);
         }
 #endif
+
+        // JARVIS 3D pose: hand this camera's RGBA device frame to the shared
+        // runner (lime-agnostic; runs the distributed pipeline on its own
+        // worker when all cameras for this frame have arrived). See src/jarvis/.
+        if (camera_select->detect_mode == Pose3D_Jarvis &&
+            jarvis::shared_runner().ready()) {
+            jarvis::shared_runner().submit_by_serial(
+                camera_params->camera_serial,
+                static_cast<const uint8_t *>(ecam->frame_recv.imagePtr),
+                ecam->frame_recv.size_x, ecam->frame_recv.size_y,
+                camera_state->frame_count);
+        }
 
         if (camera_select->frame_save_state.load() == State_Copy_New_Frame) {
             frame_saver->notify_frame_ready(ecam->frame_recv.imagePtr);

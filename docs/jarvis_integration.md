@@ -194,6 +194,64 @@ axis is baked from the ONNX = 4, no batch flag).
 
 To build/run: `cd src/jarvis && make run`.
 
+## Real-data validation (2026-06-11)
+
+Validated on a real 4-camera rat recording
+(`/home/ratan/orange_data/exp/free/rat/2026_05_21_12_57_09`, cams
+2002486/2005325/2006054/2006055 @ 3208×2200, 180 fps; ignore Cam710040). Tool:
+`src/jarvis/jarvis_pose_images.cpp` (decodes one synced frame per cam, runs the
+full pipeline with real CenterDetect, reprojects 3D keypoints onto each view).
+
+Findings:
+- **Calibration**: the red-native YAMLs (`camera_matrix/distortion_coefficients/
+  tc_ext/rc_ext`) need **no JARVIS-format conversion**. JARVIS builds
+  `cameraMatrix=[R;T]@Kᵀ` projecting `K·(Rⱼᵀ·X+T)` (its `R` is camera→world);
+  red builds `P=K[R|t]` projecting `K·(R·X+t)` (`rc_ext` is world→camera). Since
+  `rc_ext=Rⱼᵀ`, red's `Pᵀ` equals JARVIS's `cameraMatrices` exactly. Confirmed
+  empirically: triangulated center3D round-trips to **7–12 px** of the
+  CenterDetect peaks on good cameras.
+- **Robustness fix**: a mouse-model false CenterDetect on an occluded view
+  (rat behind the boxes) put a confident peak in an image corner, and the plain
+  DLT triangulation has no outlier rejection → `center3D` landed on empty floor →
+  every reprojection was wrong. Added **RANSAC center triangulation**
+  (`PoseCoordinator::robust_triangulate`, inlier reprojection < 60 px, tie-break
+  toward higher-confidence rays). After it: keypoints land on the rat,
+  **mean confidence 0.23 → 0.63** on the occluded frame, **0.79–0.82** on open
+  frames using all 4 cams.
+- The mouse_merge_6kp model generalizes to the rat well enough for a coherent
+  skeleton; retrain on rat data for production accuracy.
+
+## Live integration into lime (wired 2026-06-11)
+
+Module + hooks are in place on branch `lime-obb-jarvis`:
+- `src/jarvis/jarvis_runner.{h,cpp}` — `JarvisPoseRunner` (lime-agnostic): loads
+  the pipeline once, `submit_by_serial()` per camera frame, a background worker
+  runs the distributed pass when all cameras for a frame_id arrive (drops newer
+  frames while busy → pose throttles below capture fps), `latest()` returns the
+  3D result. `jarvis::shared_runner()` is the process-wide instance.
+- `CMakeLists.txt` — `jarvis_cuda.cu` in CUDA_SOURCES; `jarvis_calib.cpp` +
+  `jarvis_runner.cpp` in a `JARVIS_SOURCES` linked into `orange` + `orange_client`;
+  Eigen include added.
+- `video_capture.h` — new `Pose3D_Jarvis` DetectMode.
+- `video_capture.cpp` (capture thread, ~line 450) — submits each
+  `Pose3D_Jarvis` camera's RGBA device frame to `shared_runner()`.
+- `orange.cpp` (after cameras open) — inits the runner from env:
+  `JARVIS_MODEL_DIR` (engine+manifest dir), `JARVIS_CALIB_DIR` (Cam<serial>.yaml,
+  read fresh daily), `JARVIS_CENTRAL_GPU` (default highest GPU). Only cameras
+  whose `detect_mode==Pose3D_Jarvis` are included.
+
+Still to do on the rig:
+- Set `detect_mode=Pose3D_Jarvis` for the 4 rig cams (in orange.cpp's camera
+  setup block or config).
+- Draw the pose: read `shared_runner().latest()` in the GL/display thread and
+  reproject keypoints (same `red_math::projectPointR` the offline tool uses).
+- Build on the rig (needs Emergent SDK): the `src/jarvis/` module compiles
+  standalone here; the two hook edits need the full `orange` build to verify.
+- Compile the per-rig engines **BATCH=1** for the 2D stages
+  (`HN_BATCH=1 red/scripts/compile_tensorrt_engines.sh <dir>`).
+- Frame-lifetime safety: the runner reads the capture frame pointer directly;
+  if capture overwrites it mid-inference, add a double-buffer/snapshot.
+
 ## Resource allocation (the #1 constraint: speed + don't starve other GPUs)
 
 ### Hardware (this rig)

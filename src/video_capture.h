@@ -41,10 +41,11 @@ enum DetectMode {
     Detect_OFF,
     Detect2D_GLThread,
     Detect2D_Standoff,
-    Detect3D_Standoff
+    Detect3D_Standoff,
+    Pose3D_Jarvis        // JARVIS HybridNet 3D pose (see src/jarvis/)
 };
 constexpr const char *DetectModeNames[] = {"OFF", "2DGLThread", "2DStandoff",
-                                           "3DStandoff"};
+                                           "3DStandoff", "Pose3DJarvis"};
 struct CameraEachSelect {
     bool stream_on = true;
     bool record = true;

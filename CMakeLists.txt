@@ -68,6 +68,14 @@ set(FILEDIALOG_SOURCES
 # Add CUDA sources
 set(CUDA_SOURCES
     ${SRC_DIR}/kernel.cu
+    ${SRC_DIR}/jarvis/jarvis_cuda.cu
+)
+
+# JARVIS 3D pose pipeline (real-time HybridNet). Lime-agnostic module; see
+# src/jarvis/ and docs/jarvis_integration.md.
+set(JARVIS_SOURCES
+    ${SRC_DIR}/jarvis/jarvis_calib.cpp
+    ${SRC_DIR}/jarvis/jarvis_runner.cpp
 )
 
 # Add include directories
@@ -86,6 +94,7 @@ include_directories(
     /usr/local/include/opencv4
     ${THIRD_PARTY_DIR}/flatbuffers/include/
     ${DIR_TENSORRT}/include
+    /usr/include/eigen3
 )
 
 # Add link directories
@@ -103,11 +112,13 @@ add_executable(orange
     ${IMPLOT_SOURCES}
     ${FILEDIALOG_SOURCES}
     ${CUDA_SOURCES}
+    ${JARVIS_SOURCES}
 )
 
 add_executable(orange_client
     ${ORANGE_CLIENT_SOURCES}
     ${CUDA_SOURCES}
+    ${JARVIS_SOURCES}
 )
 
 add_executable(yolo_offline

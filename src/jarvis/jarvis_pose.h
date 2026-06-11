@@ -345,6 +345,11 @@ public:
 
     // Phase 1 only: per-cam center detect + DLT triangulation → center3D.
     // Returns false if < 2 cams clear the threshold.
+    // Diagnostics from the last compute_center3d (for tracking-quality debug).
+    struct CenterDiag { int cam; double img_x, img_y; float val; bool passed; };
+    const std::vector<CenterDiag> &center_diag() const { return center_diag_; }
+    const Eigen::Vector3d &last_center3d() const { return last_center3d_; }
+
     bool compute_center3d(const std::vector<const uint8_t *> &rgba_dev,
                           const std::vector<int> &w, const std::vector<int> &h,
                           Eigen::Vector3d &center3D) {
@@ -355,23 +360,71 @@ public:
             if (!cam2d_[c].launch_center(rgba_dev[c], w[c], h[c])) return false;
         std::vector<Eigen::Vector2d> und;
         std::vector<Eigen::Matrix<double, 3, 4>> proj;
+        std::vector<float> vals;
+        center_diag_.clear();
         for (int c = 0; c < N; ++c) {
             int px, py; float v;
             if (!cam2d_[c].finish_center(px, py, v)) return false;
-            if (v < kCenterDetectThreshold) continue;
             const int Hcen = cfg_.center_image_size / 2;
             double nx = (px + 0.5) * w[c] / (double)Hcen;
             double ny = (py + 0.5) * h[c] / (double)Hcen;
+            center_diag_.push_back({c, nx, ny, v, v >= kCenterDetectThreshold});
+            if (v < kCenterDetectThreshold) continue;
             const auto &cp = cams_[c];
             und.push_back(cp.telecentric
                 ? red_math::undistortPointTelecentric({nx, ny}, cp.k, cp.dist_coeffs)
                 : red_math::undistortPoint({nx, ny}, cp.k, cp.dist_coeffs));
             proj.push_back(cp.projection_mat);
+            vals.push_back(v);
         }
         cams_used_ = (int)und.size();
         if (cams_used_ < 2) { std::fprintf(stderr, "[jarvis] only %d cams cleared center\n", cams_used_); return false; }
-        center3D = red_math::triangulatePoints(und, proj);
+        center3D = robust_triangulate(und, proj, vals, center_inlier_px_);
+        last_center3d_ = center3D;
         return true;
+    }
+
+    // RANSAC over camera pairs: a false center-detect in one view (common when
+    // the animal is occluded and the model misfires on a corner/reflection)
+    // would wreck a plain DLT. Pick the pair whose triangulation has the most
+    // inlier rays (undistorted reprojection error < thresh_px), then refine on
+    // the inliers. Falls back to all-ray DLT for n==2.
+    static Eigen::Vector3d robust_triangulate(
+            const std::vector<Eigen::Vector2d> &und,
+            const std::vector<Eigen::Matrix<double, 3, 4>> &proj,
+            const std::vector<float> &vals, double thresh_px) {
+        const int n = (int)und.size();
+        if (n == 2) return red_math::triangulatePoints(und, proj);
+        auto reproj_err = [&](const Eigen::Vector3d &X, int k) {
+            Eigen::Vector4d Xh(X[0], X[1], X[2], 1.0);
+            Eigen::Vector3d p = proj[k] * Xh;
+            if (std::abs(p[2]) < 1e-9) return 1e30;
+            return (Eigen::Vector2d(p[0]/p[2], p[1]/p[2]) - und[k]).norm();
+        };
+        std::vector<int> best;
+        double best_valsum = -1;
+        Eigen::Vector3d bestX = red_math::triangulatePoints(und, proj);
+        for (int i = 0; i < n; ++i)
+            for (int j = i + 1; j < n; ++j) {
+                Eigen::Vector3d X = red_math::triangulatePoints(
+                    {und[i], und[j]}, {proj[i], proj[j]});
+                std::vector<int> in; double valsum = 0;
+                for (int k = 0; k < n; ++k)
+                    if (reproj_err(X, k) < thresh_px) { in.push_back(k); valsum += vals[k]; }
+                // Prefer more inliers; tie-break toward higher-confidence rays
+                // (a false detect on an occluded view has a weaker peak).
+                if ((int)in.size() > (int)best.size() ||
+                    ((int)in.size() == (int)best.size() && valsum > best_valsum)) {
+                    best = in; best_valsum = valsum; bestX = X;
+                }
+            }
+        if ((int)best.size() >= 2 && (int)best.size() < n) {
+            std::vector<Eigen::Vector2d> u2; std::vector<Eigen::Matrix<double,3,4>> p2;
+            for (int k : best) { u2.push_back(und[k]); p2.push_back(proj[k]); }
+            bestX = red_math::triangulatePoints(u2, p2);
+            std::fprintf(stderr, "[jarvis] robust center: kept %d/%d rays\n", (int)best.size(), n);
+        }
+        return bestX;
     }
 
     // Phases 2+3 with a caller-supplied center3D (skips center-detect). Useful
@@ -416,6 +469,9 @@ private:
     std::vector<Cam2D> cam2d_;
     Hybrid3D hybrid3d_;
     int cams_used_ = 0;
+    double center_inlier_px_ = 60.0;  // RANSAC reprojection-inlier threshold
+    std::vector<CenterDiag> center_diag_;
+    Eigen::Vector3d last_center3d_ = Eigen::Vector3d::Zero();
 };
 
 } // namespace jarvis
