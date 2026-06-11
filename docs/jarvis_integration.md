@@ -155,6 +155,45 @@ per-cam pose-overlay buffer.
   (`sm_86`) — forward-compatible. **Engines are per-rig**: run
   `red/scripts/compile_tensorrt_engines.sh <onnx_dir>` on each rig (TRT 8.6.1.6).
 
+## Implementation status (Option B built + validated, 2026-06-11)
+
+The decomposed distributed pipeline is implemented and runs end-to-end on the
+rig's real engines + real calibration. Module: `src/jarvis/`.
+
+- `jarvis_trt.h` — TRT engine wrapper (vendored from red, `jarvis_hn_trt`).
+- `jarvis_cuda.{h,cu}` — resize/crop/pad CUDA kernels (vendored from red).
+- `red_math.h` — Eigen projection/undistort/DLT-triangulation (vendored).
+- `jarvis_pose.h` — the Option-B pipeline:
+  - `Cam2D` — center_detect + efftrack engines pinned to one camera GPU, with
+    `launch_*/finish_*` split so all cameras run concurrently across GPUs.
+  - `Hybrid3D` — the **3D network** (V2VNet reproject + soft-argmax) on the
+    central GPU; gathers per-cam padded heatmaps via `cudaMemcpyPeerAsync`.
+  - `PoseCoordinator` — phase 1 center-detect (all GPUs) → DLT triangulate →
+    phase 2 efftrack (all GPUs) + gather → phase 3 hybrid3d. `predict_with_center`
+    skips phase 1 (fallback when center-detect misses; reuse last center3D).
+- `jarvis_calib.cpp` — manifest.json parse + calib loader for lime's OpenCV
+  `camera_matrix/distortion_coefficients/tc_ext/rc_ext` YAMLs. **Reads the calib
+  folder fresh each load** (rig is re-calibrated daily — point config at the live
+  folder, e.g. `/home/ratan/src/realtime_jarvis_model/calibration`, never copy it).
+- `jarvis_pose_offline.cpp` + `Makefile` — standalone smoke test (no Emergent
+  SDK). `make run` loads engines on GPUs 0–3 + hybrid3d on GPU 4, synthesizes
+  frames, runs the full distributed pass.
+
+Note the **2D engines must be compiled at BATCH=1** for the per-camera path:
+`HN_BATCH=1 red/scripts/compile_tensorrt_engines.sh <onnx_dir>` (hybrid3d's cam
+axis is baked from the ONNX = 4, no batch flag).
+
+**Measured (this rig, 4× A16 cams + A6000 central, fp32 engines):**
+- Distributed pass **~50 ms/frame** (~20 Hz). Was 119 ms before overlapping the
+  GPUs; launching all cameras then syncing cut it to 50 ms (wall-clock ≈ one
+  efftrack instead of four). The 3D output is the hybrid3d V2VNet soft-argmax.
+- **The bottleneck is efftrack (704² EfficientNet-medium) on the A16s.** Next
+  speed levers, in order: (1) **FP16 engines** (`FP16=1` compile) ~halves
+  efftrack → ~25–30 ms; (2) pipeline across frames; (3) throttle pose < capture
+  fps. The A6000 central 3D stage is ~2.3 ms — negligible.
+
+To build/run: `cd src/jarvis && make run`.
+
 ## Resource allocation (the #1 constraint: speed + don't starve other GPUs)
 
 ### Hardware (this rig)
