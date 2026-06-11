@@ -21,7 +21,8 @@ bool JarvisPoseRunner::init(const std::string &model_dir, const std::string &cal
     std::vector<CameraParams> cams;
     if (!load_calibration(calib_files, cams)) return false;
     for (int c = 0; c < n_; ++c) cams[c].gpu_id = cam_gpus[c];
-    if (!coord_.load(model_dir, cams, central_gpu)) return false;
+    // lime feeds raw BayerRG8 frames → debayer to RGBA inside the pipeline.
+    if (!coord_.load(model_dir, cams, central_gpu, /*input_bayer=*/true)) return false;
     cfg_ = coord_.config();
     cams_ = cams;
 

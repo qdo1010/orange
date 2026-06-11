@@ -18,6 +18,7 @@ INC := -I$(TRT_DIR)/include -I$(CUDA_DIR)/include -I$(EIGEN) -I$(OPENCV_INC)
 CXXFLAGS := -std=c++17 -O2 $(INC)
 LDFLAGS  := -L$(TRT_DIR)/lib -L$(CUDA_DIR)/lib64 -L$(OPENCV_LIB) \
             -lnvinfer -lnvinfer_plugin -lcudart \
+            -lnppicc -lnppc -lnppidei -lnppig -lnppial \
             -lopencv_core -lopencv_calib3d -lstdc++fs -lpthread
 
 OBJ := jarvis_cuda.o jarvis_calib.o jarvis_pose_offline.o

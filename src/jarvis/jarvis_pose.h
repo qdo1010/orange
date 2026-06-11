@@ -20,6 +20,7 @@
 #include "jarvis_cuda.h"
 #include "red_math.h"
 
+#include <npp.h>
 #include <Eigen/Core>
 #include <array>
 #include <cmath>
@@ -78,9 +79,13 @@ constexpr float kCenterDetectThreshold = 50.0f; // matches JARVIS python
 // ─────────────────────────────────────────────────────────────────────────
 class Cam2D {
 public:
-    bool load(const std::string &model_dir, int gpu_id, const Config &cfg) {
+    // input_bayer: lime feeds raw BayerRG8 (1 byte/px) — debayer to RGBA first.
+    // Test harnesses feed RGBA32 already (input_bayer=false).
+    bool load(const std::string &model_dir, int gpu_id, const Config &cfg,
+              bool input_bayer) {
         gpu_id_ = gpu_id;
         cfg_ = cfg;
+        input_bayer_ = input_bayer;
         if (cudaSetDevice(gpu_id_) != cudaSuccess) return false;
         namespace fs = std::filesystem;
         std::string cen = (fs::path(model_dir) / "center_detect.engine").string();
@@ -112,10 +117,12 @@ public:
     // launch_center enqueues everything on center_.stream and returns without
     // syncing; finish_center waits and peak-picks. Run launch on all cams,
     // THEN finish on all cams — that's what makes the 4 GPUs run concurrently.
-    bool launch_center(const uint8_t *rgba_dev, int w, int h) {
+    bool launch_center(const uint8_t *frame_dev, int w, int h) {
         if (!loaded_ || cudaSetDevice(gpu_id_) != cudaSuccess) return false;
         const int C = cfg_.center_image_size;     // 320
         const int Hcen = C / 2;                    // 160
+        const uint8_t *rgba_dev = debayer_if_needed(frame_dev, w, h, center_.stream);
+        if (!rgba_dev) return false;
         upload_frame_meta(rgba_dev, w, h, center_.stream);
         auto *in = input_binding(center_);
         auto *out = output_binding(center_, Hcen);
@@ -144,11 +151,13 @@ public:
     // Stage 3+4 split: crop + efftrack + pad enqueued on efftrack_.stream
     // (no sync). The padded (J,354,354) heatmap lands in d_padded_ on this GPU.
     // Caller must sync_efftrack() before reading/gathering d_padded_.
-    bool launch_efftrack(const uint8_t *rgba_dev, int w, int h, int cx, int cy) {
+    bool launch_efftrack(const uint8_t *frame_dev, int w, int h, int cx, int cy) {
         if (!loaded_ || cudaSetDevice(gpu_id_) != cudaSuccess) return false;
         const int B = cfg_.keypoint_bbox_size;     // 704
         const int Heff = B / 2;                     // 352
         const int J = cfg_.num_joints;
+        const uint8_t *rgba_dev = debayer_if_needed(frame_dev, w, h, efftrack_.stream);
+        if (!rgba_dev) return false;
         upload_frame_meta(rgba_dev, w, h, efftrack_.stream);
         if (!ok(cudaMemcpyAsync(d_cx_, &cx, sizeof(int), cudaMemcpyHostToDevice, efftrack_.stream), "cx H2D")) return false;
         if (!ok(cudaMemcpyAsync(d_cy_, &cy, sizeof(int), cudaMemcpyHostToDevice, efftrack_.stream), "cy H2D")) return false;
@@ -204,8 +213,37 @@ private:
             }
     }
 
+    // lime feeds raw BayerRG8 (1 byte/px). Demosaic to RGBA (4 byte/px) so the
+    // resize/crop kernels read it correctly. Returns the RGBA device buffer
+    // (cam-local, on the given stream). When input is already RGBA, passthrough.
+    const uint8_t *debayer_if_needed(const uint8_t *frame, int w, int h,
+                                     cudaStream_t s) {
+        if (!input_bayer_) return frame;
+        if (!d_debayer_ || w != debayer_w_ || h != debayer_h_) {
+            if (d_debayer_) cudaFree(d_debayer_);
+            if (!ok(cudaMalloc(&d_debayer_, (size_t)w * h * 4), "malloc debayer")) return nullptr;
+            debayer_w_ = w; debayer_h_ = h;
+        }
+        NppiSize sz{w, h};
+        NppiRect roi{0, 0, w, h};
+        nppSetStream(s);   // single worker thread → sequential, safe
+        // BayerRG8 -> RGGB grid (matches lime image_processing.h). Alpha = 255.
+        NppStatus st = nppiCFAToRGBA_8u_C1AC4R(
+            frame, w * (int)sizeof(uint8_t), sz, roi,
+            d_debayer_, w * (int)sizeof(uint8_t) * 4,
+            NPPI_BAYER_RGGB, NPPI_INTER_UNDEFINED, 255);
+        if (st != NPP_SUCCESS) {
+            std::fprintf(stderr, "[jarvis] nppiCFAToRGBA failed: %d\n", (int)st);
+            return nullptr;
+        }
+        return d_debayer_;
+    }
+
     int gpu_id_ = 0;
     bool loaded_ = false;
+    bool input_bayer_ = false;
+    uint8_t *d_debayer_ = nullptr;
+    int debayer_w_ = 0, debayer_h_ = 0;
     Config cfg_;
     jarvis_hn_trt::Logger logger_;
     jarvis_hn_trt::Engine center_, efftrack_;
@@ -324,7 +362,7 @@ private:
 class PoseCoordinator {
 public:
     bool load(const std::string &model_dir, const std::vector<CameraParams> &cams,
-              int central_gpu) {
+              int central_gpu, bool input_bayer = false) {
         if (!load_manifest(cfg_, (std::filesystem::path(model_dir) / "manifest.json").string()))
             return false;
         // hybrid3d's camera axis is baked into the ONNX at the model's camera
@@ -339,7 +377,7 @@ public:
         cams_ = cams;
         cam2d_.resize(cams.size());
         for (size_t c = 0; c < cams.size(); ++c)
-            if (!cam2d_[c].load(model_dir, cams[c].gpu_id, cfg_)) return false;
+            if (!cam2d_[c].load(model_dir, cams[c].gpu_id, cfg_, input_bayer)) return false;
         return hybrid3d_.load(model_dir, central_gpu, cfg_);
     }
 
