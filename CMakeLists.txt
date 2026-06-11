@@ -118,7 +118,6 @@ add_executable(orange
 add_executable(orange_client
     ${ORANGE_CLIENT_SOURCES}
     ${CUDA_SOURCES}
-    ${JARVIS_SOURCES}
 )
 
 add_executable(yolo_offline

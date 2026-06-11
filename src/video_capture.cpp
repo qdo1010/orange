@@ -5,11 +5,11 @@
 #include "gpu_video_encoder.h"
 #include "mjpeg_stream.h"
 #include "utils.h"
-#include "jarvis/jarvis_runner.h"
 #include <opencv2/opencv.hpp>
 #ifndef HEADLESS
 #include "FrameDetector.h"
 #include "opengldisplay.h"
+#include "jarvis/jarvis_runner.h"
 #endif
 
 // Laplacian variance below this is considered blurry (tune per camera)
@@ -444,11 +444,11 @@ inline void get_one_frame(CameraState *camera_state,
             camera_select->frame_detect_state.load() == State_Copy_New_Frame) {
             detector->notify_frame_ready(ecam->frame_recv.imagePtr, 0);
         }
-#endif
 
         // JARVIS 3D pose: hand this camera's RGBA device frame to the shared
-        // runner (lime-agnostic; runs the distributed pipeline on its own
-        // worker when all cameras for this frame have arrived). See src/jarvis/.
+        // runner (runs the distributed pipeline on its own worker when all
+        // cameras for this frame have arrived). GUI-only (the headless client
+        // never runs JARVIS), so it lives inside the HEADLESS guard.
         if (camera_select->enable_jarvis &&
             jarvis::shared_runner().ready()) {
             jarvis::shared_runner().submit_by_serial(
@@ -457,6 +457,7 @@ inline void get_one_frame(CameraState *camera_state,
                 ecam->frame_recv.size_x, ecam->frame_recv.size_y,
                 camera_state->frame_count);
         }
+#endif
 
         if (camera_select->frame_save_state.load() == State_Copy_New_Frame) {
             frame_saver->notify_frame_ready(ecam->frame_recv.imagePtr);

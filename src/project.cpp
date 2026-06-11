@@ -150,7 +150,15 @@ void load_camera_json_config_files(std::string file_name,
     if (camera_config.contains("yolo")) {
         camera_select->yolo_model = camera_config["yolo"];
     }
-    
+
+    // JARVIS 3D pose opt-in from config (so headless/network mode can enable it
+    // without the GUI checkbox). The GUI checkbox sets the same flag at runtime.
+    if (camera_config.contains("enable_jarvis")) {
+        camera_select->enable_jarvis = camera_config["enable_jarvis"];
+        std::cout << "JARVIS pose enabled: " << camera_select->enable_jarvis
+                  << " (" << camera_params->camera_serial << ")" << std::endl;
+    }
+
     // Load OBB configuration fields (all optional, defaults used if missing)
     std::cout << "=== OBB Config Loading Debug ===" << std::endl;
     std::cout << "Config file: " << file_name << std::endl;
