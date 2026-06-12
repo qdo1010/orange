@@ -87,9 +87,12 @@ public:
         cfg_ = cfg;
         input_bayer_ = input_bayer;
         if (cudaSetDevice(gpu_id_) != cudaSuccess) return false;
-        namespace fs = std::filesystem;
-        std::string cen = (fs::path(model_dir) / "center_detect.engine").string();
-        std::string eff = (fs::path(model_dir) / "hybridnet_efftrack.engine").string();
+        // Prefer an engine built on THIS gpu (<stem>.gpu<N>.engine) so there's
+        // no cross-device-instance mismatch (TRT's "different models of devices"
+        // warning); fall back to the shared <stem>.engine if the per-gpu one
+        // isn't present.
+        std::string cen = engine_path(model_dir, "center_detect", gpu_id_);
+        std::string eff = engine_path(model_dir, "hybridnet_efftrack", gpu_id_);
         if (!jarvis_hn_trt::load_engine(center_, cen, logger_)) return false;
         if (!jarvis_hn_trt::load_engine(efftrack_, eff, logger_)) return false;
 
@@ -186,6 +189,15 @@ public:
 
 private:
     static bool ok(cudaError_t e, const char *w) { return jarvis_hn_trt::cuda_ok(e, w); }
+
+    // <model_dir>/<stem>.gpu<N>.engine if present, else <model_dir>/<stem>.engine.
+    static std::string engine_path(const std::string &model_dir,
+                                   const std::string &stem, int gpu) {
+        namespace fs = std::filesystem;
+        fs::path per_gpu = fs::path(model_dir) / (stem + ".gpu" + std::to_string(gpu) + ".engine");
+        if (fs::exists(per_gpu)) return per_gpu.string();
+        return (fs::path(model_dir) / (stem + ".engine")).string();
+    }
 
     // Async on the given stream; kernels reading these run on the same stream,
     // so stream ordering guarantees the uploads land first — no sync needed.
