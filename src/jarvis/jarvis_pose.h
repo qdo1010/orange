@@ -219,6 +219,7 @@ private:
     const uint8_t *debayer_if_needed(const uint8_t *frame, int w, int h,
                                      cudaStream_t s) {
         if (!input_bayer_) return frame;
+        if (!frame || w <= 0 || h <= 0) return nullptr;  // skip a torn/null frame
         if (!d_debayer_ || w != debayer_w_ || h != debayer_h_) {
             if (d_debayer_) cudaFree(d_debayer_);
             if (!ok(cudaMalloc(&d_debayer_, (size_t)w * h * 4), "malloc debayer")) return nullptr;
@@ -424,7 +425,19 @@ public:
             vals.push_back(v);
         }
         cams_used_ = (int)und.size();
-        if (cams_used_ < 2) { std::fprintf(stderr, "[jarvis] only %d cams cleared center\n", cams_used_); return false; }
+        if (cams_used_ < 2) {
+            // Diagnostic: show every camera's center peak so we can tell a
+            // weak/empty scene from a bad image (throttled to once a second-ish).
+            static int dbg = 0;
+            if ((dbg++ % 60) == 0) {
+                std::fprintf(stderr, "[jarvis] only %d cams cleared center; peaks:", cams_used_);
+                for (const auto &d : center_diag_)
+                    std::fprintf(stderr, " cam%d=(%.0f,%.0f):%.0f%s", d.cam, d.img_x,
+                                 d.img_y, d.val, d.passed ? "*" : "");
+                std::fprintf(stderr, " (thresh %.0f)\n", kCenterDetectThreshold);
+            }
+            return false;
+        }
         center3D = robust_triangulate(und, proj, vals, center_inlier_px_);
         last_center3d_ = center3D;
         return true;
