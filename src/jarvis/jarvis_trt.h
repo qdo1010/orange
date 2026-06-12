@@ -21,7 +21,11 @@ namespace jarvis_hn_trt {
 class Logger : public nvinfer1::ILogger {
 public:
     void log(Severity severity, const char *msg) noexcept override {
-        if (severity <= Severity::kWARNING) std::fprintf(stderr, "[HN-TRT] %s\n", msg);
+        // Errors only. TRT 10.6 emits a benign "engine plan across different
+        // models of devices" WARNING because the 2D engines are built on one
+        // A16 but run on the other (identical) A16 cam GPUs — validated working,
+        // so suppress the noise but keep real errors.
+        if (severity <= Severity::kERROR) std::fprintf(stderr, "[HN-TRT] %s\n", msg);
     }
 };
 
