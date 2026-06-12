@@ -451,11 +451,15 @@ inline void get_one_frame(CameraState *camera_state,
         // never runs JARVIS), so it lives inside the HEADLESS guard.
         if (camera_select->enable_jarvis &&
             jarvis::shared_runner().ready()) {
+            // Pair cameras by the hardware PTP frame_id (aligned across cameras
+            // at the gate), NOT the local frame_count — so a dropped frame on
+            // one camera can't mis-pair the views. (16-bit; all cameras wrap
+            // together so cross-camera matching stays correct.)
             jarvis::shared_runner().submit_by_serial(
                 camera_params->camera_serial,
                 static_cast<const uint8_t *>(ecam->frame_recv.imagePtr),
                 ecam->frame_recv.size_x, ecam->frame_recv.size_y,
-                camera_state->frame_count);
+                ecam->frame_recv.frame_id);
         }
 #endif
 

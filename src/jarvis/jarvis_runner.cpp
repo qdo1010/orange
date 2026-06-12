@@ -28,7 +28,7 @@ bool JarvisPoseRunner::init(const std::string &model_dir, const std::string &cal
 
     rgba_.assign(n_, nullptr);
     w_.assign(n_, 0); h_.assign(n_, 0);
-    have_.assign(n_, 0);
+    have_.assign(n_, ~0ull);   // sentinel = "no frame yet" (distinct from id 0)
     serial_to_idx_.clear();
     for (int c = 0; c < n_; ++c) serial_to_idx_[serials[c]] = c;
     loaded_ = true;
@@ -45,7 +45,7 @@ void JarvisPoseRunner::submit(int cam_idx, const uint8_t *rgba_dev, int w, int h
     if (busy_) return;                       // worker busy → drop (throttle)
     if (frame_id != cur_frame_) {            // new frame set: reset staging
         cur_frame_ = frame_id;
-        std::fill(have_.begin(), have_.end(), 0);
+        std::fill(have_.begin(), have_.end(), ~0ull);
     }
     rgba_[cam_idx] = rgba_dev; w_[cam_idx] = w; h_[cam_idx] = h;
     have_[cam_idx] = frame_id;
