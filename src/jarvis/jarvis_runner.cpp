@@ -29,6 +29,13 @@ bool JarvisPoseRunner::init(const std::string &model_dir, const std::string &cal
     rgba_.assign(n_, nullptr);
     w_.assign(n_, 0); h_.assign(n_, 0);
     have_.assign(n_, ~0ull);   // sentinel = "no frame yet" (distinct from id 0)
+    snap_.assign(n_, nullptr);
+    snap_cap_.assign(n_, 0);
+    snap_stream_.assign(n_, nullptr);
+    for (int c = 0; c < n_; ++c) {
+        cudaSetDevice(cams_[c].gpu_id);
+        cudaStreamCreate(&snap_stream_[c]);
+    }
     serial_to_idx_.clear();
     for (int c = 0; c < n_; ++c) serial_to_idx_[serials[c]] = c;
     loaded_ = true;
@@ -39,15 +46,41 @@ bool JarvisPoseRunner::init(const std::string &model_dir, const std::string &cal
     return true;
 }
 
-void JarvisPoseRunner::submit(int cam_idx, const uint8_t *rgba_dev, int w, int h, uint64_t frame_id) {
-    if (!loaded_ || cam_idx < 0 || cam_idx >= n_ || !rgba_dev) return;
+bool JarvisPoseRunner::snapshot_frame(int cam_idx, const uint8_t *frame, int w, int h) {
+    const int gpu = cams_[cam_idx].gpu_id;
+    const size_t bytes = (size_t)w * h;      // lime feeds raw Bayer (1 byte/px)
+    int prev = -1; cudaGetDevice(&prev);
+    if (cudaSetDevice(gpu) != cudaSuccess) return false;
+    bool ok = true;
+    if (snap_cap_[cam_idx] < bytes) {
+        if (snap_[cam_idx]) cudaFree(snap_[cam_idx]);
+        if (cudaMalloc((void **)&snap_[cam_idx], bytes) != cudaSuccess) {
+            snap_[cam_idx] = nullptr; snap_cap_[cam_idx] = 0; ok = false;
+        } else snap_cap_[cam_idx] = bytes;
+    }
+    if (ok) {
+        cudaError_t e = cudaMemcpyAsync(snap_[cam_idx], frame, bytes,
+                                        cudaMemcpyDeviceToDevice, snap_stream_[cam_idx]);
+        if (e == cudaSuccess) e = cudaStreamSynchronize(snap_stream_[cam_idx]);
+        ok = (e == cudaSuccess);
+    }
+    if (prev >= 0) cudaSetDevice(prev);
+    return ok;
+}
+
+void JarvisPoseRunner::submit(int cam_idx, const uint8_t *frame_dev, int w, int h, uint64_t frame_id) {
+    if (!loaded_ || cam_idx < 0 || cam_idx >= n_ || !frame_dev || w <= 0 || h <= 0) return;
+    { std::lock_guard<std::mutex> lk(mtx_); if (busy_) return; } // skip if worker busy
+    // Copy the FRESH frame into JARVIS-owned memory now (capture thread, frame
+    // valid) so the worker processes a stable, synced set later.
+    if (!snapshot_frame(cam_idx, frame_dev, w, h)) return;
     std::lock_guard<std::mutex> lk(mtx_);
-    if (busy_) return;                       // worker busy → drop (throttle)
+    if (busy_) return;
     if (frame_id != cur_frame_) {            // new frame set: reset staging
         cur_frame_ = frame_id;
         std::fill(have_.begin(), have_.end(), ~0ull);
     }
-    rgba_[cam_idx] = rgba_dev; w_[cam_idx] = w; h_[cam_idx] = h;
+    rgba_[cam_idx] = snap_[cam_idx]; w_[cam_idx] = w; h_[cam_idx] = h;
     have_[cam_idx] = frame_id;
     for (int c = 0; c < n_; ++c) if (have_[c] != cur_frame_) return;  // not all in yet
     job_ready_ = true;                       // complete set → wake worker
@@ -116,6 +149,17 @@ void JarvisPoseRunner::stop() {
     if (!running_.exchange(false)) return;
     { std::lock_guard<std::mutex> lk(mtx_); cv_.notify_all(); }
     if (worker_.joinable()) worker_.join();
+    // Release all CUDA resources NOW, while the context is still alive — lime
+    // calls cudaDeviceReset() right after this, and the runner's static
+    // destructor would otherwise cudaFree on a dead context and segfault.
+    coord_.release();
+    for (int c = 0; c < n_; ++c) {
+        if (c < (int)cams_.size()) cudaSetDevice(cams_[c].gpu_id);
+        if (c < (int)snap_stream_.size() && snap_stream_[c]) cudaStreamDestroy(snap_stream_[c]);
+        if (c < (int)snap_.size() && snap_[c]) cudaFree(snap_[c]);
+    }
+    snap_.clear(); snap_stream_.clear(); snap_cap_.clear();
+    loaded_ = false;
 }
 
 } // namespace jarvis

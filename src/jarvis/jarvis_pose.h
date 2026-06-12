@@ -187,6 +187,18 @@ public:
     size_t padded_bytes() const { return padded_elems_ * sizeof(float); }
     int gpu_id() const { return gpu_id_; }
 
+    // Release engines + device buffers (must run while the CUDA context is still
+    // alive — i.e. before lime's cudaDeviceReset). Idempotent.
+    void release() {
+        if (!loaded_) return;
+        cudaSetDevice(gpu_id_);
+        center_.release(); efftrack_.release();
+        auto freep = [](auto *&p) { if (p) { cudaFree(p); p = nullptr; } };
+        freep(d_padded_); freep(d_rgba_); freep(d_w_); freep(d_h_);
+        freep(d_cx_); freep(d_cy_); freep(d_debayer_);
+        loaded_ = false;
+    }
+
 private:
     static bool ok(cudaError_t e, const char *w) { return jarvis_hn_trt::cuda_ok(e, w); }
 
@@ -336,6 +348,13 @@ public:
     const std::vector<float> &points3D() const { return points3D_; }
     const std::vector<float> &confidences() const { return confidences_; }
     int gpu_id() const { return gpu_id_; }
+
+    void release() {   // free engine while CUDA context is alive. Idempotent.
+        if (!loaded_) return;
+        cudaSetDevice(gpu_id_);
+        hybrid3d_.release();
+        loaded_ = false;
+    }
 
 private:
     bool h2d(const char *name, const void *host, size_t bytes) {
@@ -493,7 +512,10 @@ public:
             std::vector<Eigen::Vector2d> u2; std::vector<Eigen::Matrix<double,3,4>> p2;
             for (int k : best) { u2.push_back(und[k]); p2.push_back(proj[k]); }
             bestX = red_math::triangulatePoints(u2, p2);
-            std::fprintf(stderr, "[jarvis] robust center: kept %d/%d rays\n", (int)best.size(), n);
+            static int rdbg = 0;
+            if ((rdbg++ % 120) == 0)
+                std::fprintf(stderr, "[jarvis] robust center: kept %d/%d rays (throttled)\n",
+                             (int)best.size(), n);
         }
         return bestX;
     }
@@ -533,6 +555,12 @@ public:
     const std::vector<float> &confidences() const { return hybrid3d_.confidences(); }
     const Config &config() const { return cfg_; }
     int cams_used() const { return cams_used_; }
+
+    // Release all engines while CUDA is alive (call before cudaDeviceReset).
+    void release() {
+        for (auto &c : cam2d_) c.release();
+        hybrid3d_.release();
+    }
 
 private:
     Config cfg_;

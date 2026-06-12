@@ -1724,6 +1724,7 @@ int main(int argc, char **args) {
     quite_enet = true;
     enet_thread.join();
     // Cleanup
+    jarvis::shared_runner().stop();   // join worker + free CUDA before reset
     gx_cleanup(window);
     cudaDeviceReset();
     enet_release(&server);

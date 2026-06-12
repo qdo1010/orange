@@ -79,6 +79,16 @@ private:
     PoseCoordinator coord_;
     std::vector<CameraParams> cams_;   // calib per camera (for reprojection)
 
+    // Per-camera frame snapshots. lime's capture buffers get reused at 180 fps,
+    // so we copy each camera's frame into JARVIS-owned memory at submit time
+    // (capture thread, frame still valid) — the worker then processes a stable,
+    // synced set regardless of streaming/display load. Without this the worker
+    // reads stale/overwritten buffers and the views desync.
+    bool snapshot_frame(int cam_idx, const uint8_t *frame, int w, int h);
+    std::vector<uint8_t *> snap_;        // device buffer per cam (on its gpu)
+    std::vector<size_t> snap_cap_;       // allocated bytes per cam
+    std::vector<cudaStream_t> snap_stream_;
+
     // Staging for the in-progress frame set.
     std::mutex mtx_;
     std::condition_variable cv_;
