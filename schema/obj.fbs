@@ -1,5 +1,8 @@
 namespace Obj;
 
+// One detected object. cx,cy are the image-space center (pixels), theta the
+// orientation in degrees (0 for axis-aligned mouse/vert-cyl; OBB angle for
+// side-cyl). label is the class: 0 = Mouse, 1 = SideCyl, 2 = VertCyl.
 table obb {
     cx:float;
     cy:float;
@@ -9,9 +12,11 @@ table obb {
     label:float;
 }
 
+// Variable-length list of detected objects for one frame. There may be more
+// than one object of the same class (e.g. two side cylinders); never two mice.
+// The receiver (cbot) assigns left/right per class from world position.
 table obj_msg {
-  cylinder1:obb;
-  cylinder2:obb;
+  objects:[obb];
 }
 
 root_type obj_msg;

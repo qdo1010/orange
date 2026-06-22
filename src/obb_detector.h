@@ -18,6 +18,11 @@
 // Forward-declare YOLO bounding box (defined in common.hpp)
 struct Bbox;
 
+// Class-id convention for the 3-class detect model
+// (engine trained in TrainYOLO/data/combined_det_3class):
+//   Mouse + VertCyl -> plain axis-aligned box; SideCyl -> 2-stage OBB.
+enum DetClass { DET_MOUSE = 0, DET_SIDECYL = 1, DET_VERTCYL = 2 };
+
 struct OBB {
     float x1, y1, x2, y2, x3, y3, x4, y4;
     int class_id;
@@ -116,6 +121,12 @@ public:
     void print_priors();
     const std::map<int, ClassPrior>& get_priors() const { return priors; }
 
+    // Which detect class the 2-stage OBB routine applies to (SideCyl).
+    // This is the class stamped on the produced OBBs and the preferred key
+    // for the CSV size prior.
+    void set_target_class(int c) { obb_target_class = c; }
+    int  get_target_class() const { return obb_target_class; }
+
 private:
     void thread_loop();
     
@@ -151,6 +162,9 @@ private:
     CameraParams* camera_params;
     OBBDetectorParams params;
     std::vector<std::string> csv_paths;
+
+    // Detect class the OBB routine refines (SideCyl by default).
+    int obb_target_class = DET_SIDECYL;
     
     std::map<int, ClassPrior> priors;
     

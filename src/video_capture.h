@@ -68,6 +68,17 @@ struct CameraEachSelect {
     float obb_threshold = 30.0f;
     int obb_bg_frames = 10;
 
+    // Arena ROI: normalized (x,y) corner pairs, flattened. Detections whose
+    // center falls outside this polygon are rejected. Empty -> auto-detect.
+    std::vector<float> arena_polygon;
+
+    // Detection-rejection gates (reject reflections / false positives):
+    //   min_confidence: drop detections below this YOLO score (0 = off).
+    //   min_brightness: drop detections whose mean box gray [0-255] is below
+    //                   this (reflections are dim ~150, real objects ~210+).
+    float min_confidence = 0.0f;
+    float min_brightness = 0.0f;
+
     // Tracks which focus_test_generation was last processed post-recording
     int focus_test_gen_processed{0};
 

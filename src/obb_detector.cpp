@@ -124,33 +124,11 @@ void OBBDetector::thread_loop() {
         copy_frame_to_cpu(d_frame_original, frame);
         if (frame.empty()) { frames_processed++; continue; }
 
-        // --- Background model ---
-        // Collect first N frames to build median background
-        if (!bg_ready) {
-            cv::Mat gray;
-            cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
-            bg_accumulator.push_back(gray.clone());
-            bg_frames_collected++;
-            if (bg_frames_collected >= bg_frames_needed) {
-                // Compute median background
-                cv::Mat stack(bg_accumulator[0].rows, bg_accumulator[0].cols, CV_32F, cv::Scalar(0));
-                // Use mean for speed (close enough to median for static bg)
-                for (const auto& f : bg_accumulator) {
-                    cv::Mat f32;
-                    f.convertTo(f32, CV_32F);
-                    stack += f32;
-                }
-                stack /= (float)bg_accumulator.size();
-                stack.convertTo(background, CV_8U);
-                bg_accumulator.clear();
-                bg_ready = true;
-                std::cout << "OBB: Background model built from " << bg_frames_needed << " frames" << std::endl;
-            }
-            frames_processed++;
-            continue;
-        }
-
-        // --- OBB from background subtraction + YOLO center ---
+        // The cylinders are static fixtures, so background subtraction (which
+        // only reveals moving objects) never sees them. Instead the OBB is
+        // extracted directly from the local image content around each YOLO box
+        // (see extract_angle_and_rect) — works for static objects with no
+        // warm-up.
         std::vector<OBB> detections;
 
         // Get YOLO boxes (for center location)
@@ -162,103 +140,42 @@ void OBBDetector::thread_loop() {
                 yolo_boxes_pending.clear();
                 yolo_has_update = false;
             }
-            // Also consume seg OBBs if present (ignore them, we use bg sub now)
+            // Also consume seg OBBs if present (unused on the CV path)
             if (seg_has_update) {
                 seg_obbs_pending.clear();
                 seg_has_update = false;
             }
         }
 
-        // Get prior size
-        float pw = 0, ph = 0;
-        int tcls = 2;
-        if (priors.find(tcls) != priors.end()) {
-            pw = priors[tcls].width_median;
-            ph = priors[tcls].height_median;
-        }
+        // The OBB is sized from the YOLO detection box (which tightly bounds
+        // the object). We deliberately do NOT use the CSV size prior here — a
+        // stale/under-sized prior draws a box smaller than the real object.
+        int tcls = obb_target_class;
 
         if (!boxes.empty()) {
-            // Background subtraction to find foreground
-            cv::Mat gray;
-            cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
-            cv::Mat diff;
-            cv::absdiff(gray, background, diff);
-
-            static int bg_debug_count = 0;
-
             for (const auto& bbox : boxes) {
                 float cx = bbox.rect.x + bbox.rect.width / 2.0f;
                 float cy = bbox.rect.y + bbox.rect.height / 2.0f;
-                float ow = (pw > 0) ? pw : bbox.rect.width;
-                float oh = (ph > 0) ? ph : bbox.rect.height;
+                // Size the OBB to the YOLO box so it covers the whole object.
+                float ow = bbox.rect.width;
+                float oh = bbox.rect.height;
 
-                // Crop around YOLO center
-                float pad = std::max(ow, oh) * 1.5f;
-                int rx1 = std::max(0, (int)(cx - pad));
-                int ry1 = std::max(0, (int)(cy - pad));
-                int rx2 = std::min(frame.cols, (int)(cx + pad));
-                int ry2 = std::min(frame.rows, (int)(cy + pad));
-                if (rx2 <= rx1 || ry2 <= ry1) continue;
+                // Orientation straight from the local crop: threshold the
+                // brightest blob and take its PCA angle. No background needed,
+                // so static cylinders are handled. Returns 0 (axis-aligned) if
+                // no blob is found, so a box is still produced either way.
+                float crop_w = std::max(bbox.rect.width, ow);
+                float crop_h = std::max(bbox.rect.height, oh);
+                cv::RotatedRect measured;
+                float raw_angle = extract_angle_and_rect(frame, cx, cy,
+                                                         crop_w, crop_h, 1.3f,
+                                                         measured);
 
-                cv::Mat crop_diff = diff(cv::Rect(rx1, ry1, rx2 - rx1, ry2 - ry1));
-                cv::Mat crop_gray = gray(cv::Rect(rx1, ry1, rx2 - rx1, ry2 - ry1));
+                // EMA smooth the angle across frames
+                float angle = smooth_angle(cx, cy, raw_angle);
 
-                // Step 1: bg subtraction mask — find what changed (cylinder + shadow)
-                cv::Mat fg_mask;
-                cv::threshold(crop_diff, fg_mask, 20, 255, cv::THRESH_BINARY);
-                cv::Mat kern = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
-                cv::morphologyEx(fg_mask, fg_mask, cv::MORPH_CLOSE, kern, cv::Point(-1, -1), 2);
-
-                // Step 2: within the foreground, isolate just the WHITE face
-                // (brightest pixels in the foreground region)
-                cv::Mat white_mask;
-                // Get the brightness values of only foreground pixels
-                double fg_max;
-                cv::minMaxLoc(crop_gray, nullptr, &fg_max, nullptr, nullptr, fg_mask);
-                // Threshold at 80% of max brightness — captures the white face only
-                cv::threshold(crop_gray, white_mask, fg_max * 0.80, 255, cv::THRESH_BINARY);
-                // AND with foreground to remove any background bright spots
-                cv::bitwise_and(white_mask, fg_mask, white_mask);
-
-                // Find contours of the white face
-                std::vector<std::vector<cv::Point>> contours;
-                cv::findContours(white_mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-                if (contours.empty()) continue;
-
-                // Pick largest contour near crop center
-                cv::Point2f crop_center((rx2 - rx1) / 2.0f, (ry2 - ry1) / 2.0f);
-                int best_idx = -1;
-                float best_dist = std::numeric_limits<float>::max();
-                for (size_t i = 0; i < contours.size(); i++) {
-                    if (cv::contourArea(contours[i]) < 50) continue;
-                    cv::Moments m = cv::moments(contours[i]);
-                    if (m.m00 < 1) continue;
-                    cv::Point2f c(m.m10 / m.m00, m.m01 / m.m00);
-                    float d = cv::norm(c - crop_center);
-                    if (d < best_dist) { best_dist = d; best_idx = (int)i; }
-                }
-                if (best_idx < 0) continue;
-
-                cv::RotatedRect rrect = cv::minAreaRect(contours[best_idx]);
-                float angle = rrect.angle;
-
-                if (bg_debug_count < 3) {
-                    float aspect = std::max(rrect.size.width, rrect.size.height) /
-                                   std::max(std::min(rrect.size.width, rrect.size.height), 1.0f);
-                    std::cout << "OBB white-face: area=" << cv::contourArea(contours[best_idx])
-                              << " size=" << rrect.size.width << "x" << rrect.size.height
-                              << " aspect=" << aspect
-                              << " angle=" << angle << "°" << std::endl;
-                    cv::imwrite("/tmp/obb_fg_mask.png", fg_mask);
-                    cv::imwrite("/tmp/obb_white_mask.png", white_mask);
-                    bg_debug_count++;
-                }
-
-                // EMA smooth the angle
-                angle = smooth_angle(cx, cy, angle);
-
-                // Build OBB: YOLO center + prior size + bg-sub angle
-                cv::RotatedRect final_rect(cv::Point2f(cx, cy), cv::Size2f(ow, oh), angle);
+                cv::RotatedRect final_rect(cv::Point2f(cx, cy),
+                                           cv::Size2f(ow, oh), angle);
                 cv::Point2f pts[4];
                 final_rect.points(pts);
                 auto ordered = order_corners_clockwise_start_tl({pts[0], pts[1], pts[2], pts[3]});
@@ -654,43 +571,70 @@ float OBBDetector::extract_angle_and_rect(
     cv::cvtColor(patch, gray, cv::COLOR_BGR2GRAY);
     cv::GaussianBlur(gray, blur, cv::Size(3, 3), 0);
 
-    // Percentile threshold: isolate the brightest ~15% (the cylinder)
-    std::vector<uchar> pixels(blur.begin<uchar>(), blur.end<uchar>());
-    std::nth_element(pixels.begin(), pixels.begin() + (int)(pixels.size() * 0.85f), pixels.end());
-    int thresh = pixels[(int)(pixels.size() * 0.85f)];
-    cv::threshold(blur, mask, thresh, 255, cv::THRESH_BINARY);
+    // Otsu auto-threshold separates the bright cylinder from the grey arena and
+    // captures the FULL elongated body (not just the specular highlight), which
+    // is what makes the orientation stable. Fall back to a high percentile if
+    // Otsu's split is degenerate (low-contrast crop).
+    cv::threshold(blur, mask, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
+    int nz = cv::countNonZero(mask);
+    if (nz < 30 || nz > (int)(0.9 * mask.total())) {
+        std::vector<uchar> pixels(blur.begin<uchar>(), blur.end<uchar>());
+        int k = (int)(pixels.size() * 0.85f);
+        std::nth_element(pixels.begin(), pixels.begin() + k, pixels.end());
+        cv::threshold(blur, mask, pixels[k], 255, cv::THRESH_BINARY);
+    }
+    // Open to drop small specular speckles, close small gaps in the body.
+    cv::Mat se = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
+    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, se);
+    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, se);
 
     std::vector<std::vector<cv::Point>> contours;
     cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
     if (contours.empty()) return 0.0f;
 
-    // Pick contour closest to patch center
+    // Pick the LARGEST contour near the patch center (prefers the cylinder body
+    // over small off-center reflections). score = area / (1 + dist_to_center).
     cv::Point2f patch_center(patch.cols / 2.0f, patch.rows / 2.0f);
     int best_idx = -1;
-    float best_dist = std::numeric_limits<float>::max();
+    double best_score = -1.0;
     for (size_t i = 0; i < contours.size(); i++) {
-        if (cv::contourArea(contours[i]) < 30) continue;
-        cv::Moments m = cv::moments(contours[i]);
-        if (m.m00 < 1) continue;
-        cv::Point2f centroid(m.m10 / m.m00, m.m01 / m.m00);
-        float d = cv::norm(centroid - patch_center);
-        if (d < best_dist) { best_dist = d; best_idx = (int)i; }
+        double area = cv::contourArea(contours[i]);
+        if (area < 30) continue;
+        cv::Moments mm = cv::moments(contours[i]);
+        if (mm.m00 < 1) continue;
+        cv::Point2f centroid(mm.m10 / mm.m00, mm.m01 / mm.m00);
+        double d = cv::norm(centroid - patch_center);
+        double score = area / (1.0 + d);
+        if (score > best_score) { best_score = score; best_idx = (int)i; }
     }
     if (best_idx < 0) return 0.0f;
 
     const auto& cnt = contours[best_idx];
 
-    // Use image moments (PCA) for angle — weights every pixel in the
-    // blob equally, much more stable than minAreaRect for near-square shapes.
-    cv::Moments m = cv::moments(cnt);
-    float angle_rad = 0.5f * std::atan2(2.0f * m.mu11, m.mu20 - m.mu02);
-    float angle_deg = angle_rad * 180.0f / (float)M_PI;
-
-    // Fill out_rect with minAreaRect for callers that need it
+    // Fit an oriented box to the segmented cylinder.
     cv::RotatedRect rect = cv::minAreaRect(cnt);
-    out_rect = cv::RotatedRect(
-        cv::Point2f(rect.center.x + x1p, rect.center.y + y1p),
-        rect.size, rect.angle);
+
+    // Long-axis orientation. OpenCV's rect.angle is the angle of the WIDTH edge;
+    // take the longer side as the cylinder axis, normalize to (-90, 90].
+    float angle_deg = rect.angle;
+    if (rect.size.width < rect.size.height) angle_deg += 90.0f;
+    while (angle_deg > 90.0f)   angle_deg -= 180.0f;
+    while (angle_deg <= -90.0f) angle_deg += 180.0f;
+
+    // For a near-square blob the minAreaRect axis is ill-defined; fall back to
+    // image-moments PCA (weights every pixel) which degrades more gracefully.
+    float longside  = std::max(rect.size.width, rect.size.height);
+    float shortside = std::max(1.0f, std::min(rect.size.width, rect.size.height));
+    if (longside / shortside < 1.15f) {
+        cv::Moments m = cv::moments(cnt);
+        angle_deg = 0.5f * std::atan2(2.0f * m.mu11, m.mu20 - m.mu02) * 180.0f / (float)M_PI;
+    }
+
+    // Return the fitted oriented box, but CENTERED ON THE YOLO CENTER (cx, cy).
+    // Take only SIZE and ANGLE from the fit — the segmentation/minAreaRect
+    // center can drift (shadow, partial/over-grown mask), and we never want the
+    // OBB center to differ from the YOLO detection center.
+    out_rect = cv::RotatedRect(cv::Point2f(cx, cy), rect.size, rect.angle);
 
     return angle_deg;
 }
@@ -782,7 +726,7 @@ std::vector<OBB> OBBDetector::refine_yolo_detections(
         float crop_h = std::max(bh, obb_h);
         cv::RotatedRect measured;
         float raw_angle = extract_angle_and_rect(frame, cx, cy,
-                                                 crop_w, crop_h, 2.0f, measured);
+                                                 crop_w, crop_h, 1.3f, measured);
 
         // Temporal smoothing via EMA
         float angle = smooth_angle(cx, cy, raw_angle);

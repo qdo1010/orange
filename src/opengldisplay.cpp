@@ -16,6 +16,67 @@
 #include <chrono>
 #include <iostream>
 
+// Mean intensity (0-255) of the debayered RGBA frame inside a detection box.
+// Used to reject dim reflections (~150) vs bright real objects (~210+).
+static float box_mean_brightness(const unsigned char *d_rgba, int W, int H,
+                                 const cv::Rect_<float> &rect) {
+    int bx = std::max(0, (int)rect.x);
+    int by = std::max(0, (int)rect.y);
+    int bw = std::min(W - bx, (int)rect.width);
+    int bh = std::min(H - by, (int)rect.height);
+    if (bw <= 0 || bh <= 0)
+        return 0.0f;
+    std::vector<unsigned char> buf((size_t)bw * bh * 4);
+    cudaMemcpy2D(buf.data(), (size_t)bw * 4,
+                 d_rgba + ((size_t)by * W + bx) * 4, (size_t)W * 4,
+                 (size_t)bw * 4, bh, cudaMemcpyDeviceToHost);
+    double sum = 0;
+    size_t n = (size_t)bw * bh;
+    for (size_t i = 0; i < n; i++)
+        sum += buf[i * 4] + buf[i * 4 + 1] + buf[i * 4 + 2];
+    return (float)(sum / (3.0 * n));
+}
+
+// Detect the arena (a large static grey rectangle) in a grayscale frame.
+// Returns its boundary as a convex polygon. The arena must dominate the frame
+// (>= 10% area) to be accepted, which rejects smaller bright regions such as
+// reflections.
+static bool detect_arena(const cv::Mat &gray, std::vector<cv::Point> &out_poly) {
+    cv::Mat blur, bw;
+    cv::GaussianBlur(gray, blur, cv::Size(7, 7), 0);
+    // Otsu separates the bright grey arena floor from the darker surround.
+    cv::threshold(blur, bw, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
+    cv::Mat k = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(15, 15));
+    cv::morphologyEx(bw, bw, cv::MORPH_CLOSE, k);
+
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(bw, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    if (contours.empty())
+        return false;
+
+    int best = -1;
+    double best_area = 0;
+    for (size_t i = 0; i < contours.size(); i++) {
+        double a = cv::contourArea(contours[i]);
+        if (a > best_area) {
+            best_area = a;
+            best = (int)i;
+        }
+    }
+    if (best < 0)
+        return false;
+    if (best_area / (double)(gray.cols * gray.rows) < 0.10)
+        return false; // arena should dominate the frame
+
+    std::vector<cv::Point> hull;
+    cv::convexHull(contours[best], hull);
+    std::vector<cv::Point> approx;
+    double peri = cv::arcLength(hull, true);
+    cv::approxPolyDP(hull, approx, 0.02 * peri, true);
+    out_poly = (approx.size() >= 4) ? approx : hull;
+    return true;
+}
+
 COpenGLDisplay::COpenGLDisplay(const char *name, CameraParams *camera_params,
                                CameraEachSelect *camera_select,
                                unsigned char *display_buffer,
@@ -74,7 +135,8 @@ COpenGLDisplay::COpenGLDisplay(const char *name, CameraParams *camera_params,
         OBBDetectorParams obb_params;
         std::vector<std::string> csv_paths = {camera_select->obb_csv_path};
         obb_detector = new OBBDetector(camera_params, csv_paths, obb_params);
-        
+        obb_detector->set_target_class(DET_SIDECYL);
+
         if (!obb_detector->initialize()) {
             std::cerr << "COpenGLDisplay: Failed to initialize OBB detector with CSV "
                       << camera_select->obb_csv_path << " for camera "
@@ -105,6 +167,11 @@ COpenGLDisplay::~COpenGLDisplay() {
     if (d_obb_points) {
         cudaFree(d_obb_points);
         d_obb_points = nullptr;
+    }
+
+    if (d_box_points) {
+        cudaFree(d_box_points);
+        d_box_points = nullptr;
     }
 }
 
@@ -141,6 +208,8 @@ void COpenGLDisplay::ThreadRunning() {
         cudaMalloc((void **)&d_skeleton, sizeof(unsigned int) * 8);
         CHECK(cudaMemcpy(d_skeleton, skeleton, sizeof(unsigned int) * 8,
                          cudaMemcpyHostToDevice));
+        // Buffer for axis-aligned boxes (Mouse / VertCyl). One box at a time.
+        cudaMalloc((void **)&d_box_points, sizeof(float) * 8);
     }
     
     // Allocate OBB GPU resources if needed
@@ -153,6 +222,25 @@ void COpenGLDisplay::ThreadRunning() {
     }
     if (obb_overlay_enabled) {
         cudaMalloc((void **)&d_obb_points, sizeof(float) * 8 * 10); // Support up to 10 OBBs
+    }
+
+    // If the config supplies an explicit arena polygon (normalized x,y pairs),
+    // use it directly and skip live auto-detection. The arena is static, so a
+    // fixed polygon is the most robust option.
+    if (!camera_select->arena_polygon.empty()) {
+        arena_poly.clear();
+        const auto &ap = camera_select->arena_polygon;
+        for (size_t i = 0; i + 1 < ap.size(); i += 2) {
+            arena_poly.emplace_back(
+                (int)(ap[i] * camera_params->width + 0.5f),
+                (int)(ap[i + 1] * camera_params->height + 0.5f));
+        }
+        if (arena_poly.size() >= 3) {
+            arena_detected = true;
+            std::cout << "Arena polygon from config for "
+                      << camera_params->camera_serial << " ("
+                      << arena_poly.size() << " pts)" << std::endl;
+        }
     }
 
     std::vector<Bbox> objs;
@@ -204,6 +292,26 @@ void COpenGLDisplay::ThreadRunning() {
             // nvtxRangePop();
 
             if (yolo_glthread_enabled) {
+                // One-time arena detection: copy a debayered frame to the CPU
+                // and locate the static grey arena. Retries each frame until it
+                // succeeds (e.g. once the stream produces a real image).
+                if (!arena_detected) {
+                    cv::Mat rgba(camera_params->height, camera_params->width,
+                                 CV_8UC4);
+                    CHECK(cudaMemcpy(rgba.data, debayer.d_debayer,
+                                     (size_t)camera_params->width *
+                                         camera_params->height * 4,
+                                     cudaMemcpyDeviceToHost));
+                    cv::Mat gray;
+                    cv::cvtColor(rgba, gray, cv::COLOR_RGBA2GRAY);
+                    if (detect_arena(gray, arena_poly)) {
+                        arena_detected = true;
+                        std::cout << "Arena detected for "
+                                  << camera_params->camera_serial << " ("
+                                  << arena_poly.size() << " pts)" << std::endl;
+                    }
+                }
+
                 // Match yolo_offline input layout (OpenCV frames are BGR).
                 rgba2bgr_convert(d_convert, debayer.d_debayer,
                                  camera_params->width, camera_params->height,
@@ -220,6 +328,50 @@ void COpenGLDisplay::ThreadRunning() {
                 }
 
                 yolov8->postprocess(objs);
+
+                // Reject false positives (reflections, off-arena, low score):
+                //   1) confidence gate, 2) arena ROI, 3) box brightness.
+                if (!objs.empty()) {
+                    static uint64_t gate_dbg = 0;
+                    std::vector<Bbox> kept;
+                    kept.reserve(objs.size());
+                    for (const auto &b : objs) {
+                        bool ok_conf =
+                            (camera_select->min_confidence <= 0.0f) ||
+                            (b.prob >= camera_select->min_confidence);
+                        bool ok_arena = true;
+                        if (arena_detected && !arena_poly.empty()) {
+                            cv::Point2f ctr(b.rect.x + b.rect.width * 0.5f,
+                                            b.rect.y + b.rect.height * 0.5f);
+                            ok_arena =
+                                cv::pointPolygonTest(arena_poly, ctr, false) >= 0;
+                        }
+                        float bright = -1.0f;
+                        bool ok_bright = true;
+                        if (camera_select->min_brightness > 0.0f) {
+                            bright = box_mean_brightness(
+                                debayer.d_debayer, camera_params->width,
+                                camera_params->height, b.rect);
+                            ok_bright = bright >= camera_select->min_brightness;
+                        }
+                        if (gate_dbg < 40) {
+                            std::cout << "  gate[" << camera_params->camera_serial
+                                      << "] label=" << b.label
+                                      << " conf=" << b.prob
+                                      << " bright=" << bright
+                                      << " arena=" << ok_arena
+                                      << " -> "
+                                      << ((ok_conf && ok_arena && ok_bright)
+                                              ? "KEEP"
+                                              : "REJECT")
+                                      << std::endl;
+                            gate_dbg++;
+                        }
+                        if (ok_conf && ok_arena && ok_bright)
+                            kept.push_back(b);
+                    }
+                    objs.swap(kept);
+                }
                 yolo_frame_counter++;
                 last_yolo_obj_count = objs.size();
                 if (!objs.empty()) {
@@ -260,34 +412,54 @@ void COpenGLDisplay::ThreadRunning() {
                 }
             }
             
-            // OBB Detection
+            // Class-aware detection split:
+            //   SideCyl (1)             -> 2-stage OBB routine below.
+            //   Mouse (0) + VertCyl (2) -> plain axis-aligned box, drawn AFTER
+            //                              the OBB block so the overlay graphics
+            //                              don't pollute the frame the OBB CV
+            //                              refinement reads.
+            // SideCyl is treated as plain when OBB refinement is unavailable.
+            std::vector<Bbox> sidecyl_objs;
+            std::vector<Bbox> plain_objs;
+            std::vector<OBB> sidecyl_obbs;  // oriented SideCyl results for msg
+            if (yolo_glthread_enabled) {
+                for (const auto &b : objs) {
+                    if (b.label == DET_SIDECYL && obb_overlay_enabled)
+                        sidecyl_objs.push_back(b);
+                    else
+                        plain_objs.push_back(b);
+                }
+            }
+
+            // OBB Detection (SideCyl only)
             if (obb_overlay_enabled) {
                 std::vector<OBB> obb_detections;
 
-                if (objs.empty()) {
+                if (sidecyl_objs.empty()) {
                     // No YOLO detection this frame — no OBBs. Keep the worker
                     // in sync (so it won't return stale data on the next
                     // frame that does have a detection) but don't consult it
                     // now; get_latest_detections() races the worker and
                     // would return the previous frame's box.
-                    obb_detector->set_yolo_boxes(objs);
+                    obb_detector->set_yolo_boxes(sidecyl_objs);
                 } else if (yolov8 && yolov8->has_mask_protos() &&
-                           !objs[0].mask_coeffs.empty()) {
+                           !sidecyl_objs[0].mask_coeffs.empty()) {
                     // Seg-mask path: compute initial OBBs, hand to worker
                     // for iterative edge optimization.
                     auto seg_obbs = obb_detector->refine_from_seg_masks(
-                        objs,
+                        sidecyl_objs,
                         yolov8->get_mask_protos(),
                         yolov8->get_mask_proto_h(),
                         yolov8->get_mask_proto_w(),
                         yolov8->get_mask_num_protos(),
-                        yolov8->pparam);
+                        yolov8->pparam,
+                        DET_SIDECYL);
                     obb_detector->set_seg_obbs(seg_obbs);
                     obb_detector->notify_frame_ready(debayer.d_debayer, 0);
                     obb_detections = obb_detector->get_latest_detections();
                 } else {
                     // Fallback: two-stage CV-based refinement
-                    obb_detector->set_yolo_boxes(objs);
+                    obb_detector->set_yolo_boxes(sidecyl_objs);
                     obb_detector->notify_frame_ready(debayer.d_debayer, 0);
                     obb_detections = obb_detector->get_latest_detections();
                 }
@@ -336,50 +508,57 @@ void COpenGLDisplay::ThreadRunning() {
                                     obb.class_id, 0, 255, 0, 0);
                     }
                     
-                    // Build FlatBuffer message (up to 2 slots)
-                    flatbuffers::FlatBufferBuilder* fb = indigo_signal_builder->builder;
-                    fb->Clear();
-                    ::flatbuffers::Offset<Obj::obb> fb_obj_a{};
-                    ::flatbuffers::Offset<Obj::obb> fb_obj_b{};
-                    
-                    for (size_t i = 0; i < stable_detections.size() && i < 10; i++) {
-                        const OBB& obb = stable_detections[i];
-                        auto xywhr = obb_detector->obb_to_xywhr(obb);
-                        float fb_label = obb.shape_verified ? 0.0f : 1.0f;
-                        
-                        // Assign slot
-                        int assigned_slot = -1;
-                        if (!slots_initialized) {
-                            if (i == 0) { assigned_slot = 0; persistent_slot_assignments[0] = i; }
-                            else if (i == 1) { assigned_slot = 1; persistent_slot_assignments[1] = i; }
-                        } else {
-                            if (persistent_slot_assignments[0] == (int)i) assigned_slot = 0;
-                            else if (persistent_slot_assignments[1] == (int)i) assigned_slot = 1;
-                        }
-                        
-                        if (assigned_slot != -1) {
-                            auto fb_obj = Obj::Createobb(*fb, xywhr.x, xywhr.y, xywhr.w, xywhr.h, xywhr.r, fb_label);
-                            if (assigned_slot == 0) { fb_obj_a = fb_obj; obb_slot_valid[0] = 1; obb_slot_cx[0] = xywhr.x; obb_slot_cy[0] = xywhr.y; }
-                            else { fb_obj_b = fb_obj; obb_slot_valid[1] = 1; obb_slot_cx[1] = xywhr.x; obb_slot_cy[1] = xywhr.y; }
-                        }
-                    }
-                    
-                    if (!slots_initialized) slots_initialized = true;
-                    
-                    if (!fb_obj_a.o) { fb_obj_a = Obj::Createobb(*fb, 0,0,0,0,0,0); obb_slot_valid[0] = 0; }
-                    if (!fb_obj_b.o) { fb_obj_b = Obj::Createobb(*fb, 0,0,0,0,0,0); obb_slot_valid[1] = 0; }
-                    
-                    auto obj_msg = Obj::Createobj_msg(*fb, fb_obj_a, fb_obj_b);
-                    fb->Finish(obj_msg);
-                    
-                    // Send to CBOT
-                    if (indigo_signal_builder->indigo_connection) {
-                        send_cbot_obj_pos2d(indigo_signal_builder->server, fb, indigo_signal_builder->indigo_connection);
-                    }
                 } else {
                     last_locked_detections.clear();
                     last_detections_sent = false;
                 }
+                // Oriented SideCyl results to fold into the outgoing message.
+                sidecyl_obbs = last_locked_detections;
+            }
+
+            // Draw axis-aligned boxes for Mouse / VertCyl (and SideCyl when OBB
+            // is disabled). Done after the OBB block so these overlay lines are
+            // not present in the frame the OBB CV refinement reads.
+            for (const auto &b : plain_objs) {
+                const auto &r = b.rect;
+                float corners[8] = {
+                    r.x,           r.y,
+                    r.x + r.width, r.y,
+                    r.x + r.width, r.y + r.height,
+                    r.x,           r.y + r.height};
+                CHECK(cudaMemcpyAsync(d_box_points, corners, sizeof(float) * 8,
+                                      cudaMemcpyHostToDevice, 0));
+                gpu_draw_box(debayer.d_debayer, camera_params->width,
+                             camera_params->height, d_box_points, b.label, 0);
+            }
+
+            // Send all detected objects to cbot as a flexible list. Each entry
+            // carries its class label (0=Mouse,1=SideCyl,2=VertCyl) and image
+            // center; SideCyls carry their oriented angle, others theta=0.
+            // cbot assigns left/right per class and renders in MuJoCo.
+            if (yolo_glthread_enabled && indigo_signal_builder->indigo_connection) {
+                flatbuffers::FlatBufferBuilder *fb = indigo_signal_builder->builder;
+                fb->Clear();
+                std::vector<::flatbuffers::Offset<Obj::obb>> fb_objs;
+                // Mouse / VertCyl (and SideCyl when OBB off): axis-aligned.
+                for (const auto &b : plain_objs) {
+                    float cx = b.rect.x + b.rect.width * 0.5f;
+                    float cy = b.rect.y + b.rect.height * 0.5f;
+                    fb_objs.push_back(Obj::Createobb(*fb, cx, cy, b.rect.width,
+                                                     b.rect.height, 0.0f,
+                                                     (float)b.label));
+                }
+                // SideCyl: oriented box from the OBB stage.
+                for (const auto &obb : sidecyl_obbs) {
+                    auto x = obb_detector->obb_to_xywhr(obb);
+                    fb_objs.push_back(Obj::Createobb(*fb, x.x, x.y, x.w, x.h,
+                                                     x.r, (float)DET_SIDECYL));
+                }
+                auto vec = fb->CreateVector(fb_objs);
+                auto msg = Obj::Createobj_msg(*fb, vec);
+                fb->Finish(msg);
+                send_cbot_obj_pos2d(indigo_signal_builder->server, fb,
+                                    indigo_signal_builder->indigo_connection);
             }
             // nvtxRangePush("display_gl_copy_to_interop_buffer");
             if (camera_select->downsample != 1) {

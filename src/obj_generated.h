@@ -34,38 +34,20 @@ struct obb FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   float cx() const {
     return GetField<float>(VT_CX, 0.0f);
   }
-  bool mutate_cx(float _cx = 0.0f) {
-    return SetField<float>(VT_CX, _cx, 0.0f);
-  }
   float cy() const {
     return GetField<float>(VT_CY, 0.0f);
-  }
-  bool mutate_cy(float _cy = 0.0f) {
-    return SetField<float>(VT_CY, _cy, 0.0f);
   }
   float w() const {
     return GetField<float>(VT_W, 0.0f);
   }
-  bool mutate_w(float _w = 0.0f) {
-    return SetField<float>(VT_W, _w, 0.0f);
-  }
   float h() const {
     return GetField<float>(VT_H, 0.0f);
-  }
-  bool mutate_h(float _h = 0.0f) {
-    return SetField<float>(VT_H, _h, 0.0f);
   }
   float theta() const {
     return GetField<float>(VT_THETA, 0.0f);
   }
-  bool mutate_theta(float _theta = 0.0f) {
-    return SetField<float>(VT_THETA, _theta, 0.0f);
-  }
   float label() const {
     return GetField<float>(VT_LABEL, 0.0f);
-  }
-  bool mutate_label(float _label = 0.0f) {
-    return SetField<float>(VT_LABEL, _label, 0.0f);
   }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -133,27 +115,16 @@ inline ::flatbuffers::Offset<obb> Createobb(
 struct obj_msg FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   typedef obj_msgBuilder Builder;
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
-    VT_CYLINDER1 = 4,
-    VT_CYLINDER2 = 6
+    VT_OBJECTS = 4
   };
-  const Obj::obb *cylinder1() const {
-    return GetPointer<const Obj::obb *>(VT_CYLINDER1);
-  }
-  Obj::obb *mutable_cylinder1() {
-    return GetPointer<Obj::obb *>(VT_CYLINDER1);
-  }
-  const Obj::obb *cylinder2() const {
-    return GetPointer<const Obj::obb *>(VT_CYLINDER2);
-  }
-  Obj::obb *mutable_cylinder2() {
-    return GetPointer<Obj::obb *>(VT_CYLINDER2);
+  const ::flatbuffers::Vector<::flatbuffers::Offset<Obj::obb>> *objects() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<Obj::obb>> *>(VT_OBJECTS);
   }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyOffset(verifier, VT_CYLINDER1) &&
-           verifier.VerifyTable(cylinder1()) &&
-           VerifyOffset(verifier, VT_CYLINDER2) &&
-           verifier.VerifyTable(cylinder2()) &&
+           VerifyOffset(verifier, VT_OBJECTS) &&
+           verifier.VerifyVector(objects()) &&
+           verifier.VerifyVectorOfTables(objects()) &&
            verifier.EndTable();
   }
 };
@@ -162,11 +133,8 @@ struct obj_msgBuilder {
   typedef obj_msg Table;
   ::flatbuffers::FlatBufferBuilder &fbb_;
   ::flatbuffers::uoffset_t start_;
-  void add_cylinder1(::flatbuffers::Offset<Obj::obb> cylinder1) {
-    fbb_.AddOffset(obj_msg::VT_CYLINDER1, cylinder1);
-  }
-  void add_cylinder2(::flatbuffers::Offset<Obj::obb> cylinder2) {
-    fbb_.AddOffset(obj_msg::VT_CYLINDER2, cylinder2);
+  void add_objects(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<Obj::obb>>> objects) {
+    fbb_.AddOffset(obj_msg::VT_OBJECTS, objects);
   }
   explicit obj_msgBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
@@ -181,12 +149,19 @@ struct obj_msgBuilder {
 
 inline ::flatbuffers::Offset<obj_msg> Createobj_msg(
     ::flatbuffers::FlatBufferBuilder &_fbb,
-    ::flatbuffers::Offset<Obj::obb> cylinder1 = 0,
-    ::flatbuffers::Offset<Obj::obb> cylinder2 = 0) {
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<Obj::obb>>> objects = 0) {
   obj_msgBuilder builder_(_fbb);
-  builder_.add_cylinder2(cylinder2);
-  builder_.add_cylinder1(cylinder1);
+  builder_.add_objects(objects);
   return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<obj_msg> Createobj_msgDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const std::vector<::flatbuffers::Offset<Obj::obb>> *objects = nullptr) {
+  auto objects__ = objects ? _fbb.CreateVector<::flatbuffers::Offset<Obj::obb>>(*objects) : 0;
+  return Obj::Createobj_msg(
+      _fbb,
+      objects__);
 }
 
 inline const Obj::obj_msg *Getobj_msg(const void *buf) {
@@ -197,14 +172,6 @@ inline const Obj::obj_msg *GetSizePrefixedobj_msg(const void *buf) {
   return ::flatbuffers::GetSizePrefixedRoot<Obj::obj_msg>(buf);
 }
 
-inline obj_msg *GetMutableobj_msg(void *buf) {
-  return ::flatbuffers::GetMutableRoot<obj_msg>(buf);
-}
-
-inline Obj::obj_msg *GetMutableSizePrefixedobj_msg(void *buf) {
-  return ::flatbuffers::GetMutableSizePrefixedRoot<Obj::obj_msg>(buf);
-}
-
 inline bool Verifyobj_msgBuffer(
     ::flatbuffers::Verifier &verifier) {
   return verifier.VerifyBuffer<Obj::obj_msg>(nullptr);
@@ -213,10 +180,6 @@ inline bool Verifyobj_msgBuffer(
 inline bool VerifySizePrefixedobj_msgBuffer(
     ::flatbuffers::Verifier &verifier) {
   return verifier.VerifySizePrefixedBuffer<Obj::obj_msg>(nullptr);
-}
-
-inline const char *obj_msgExtension() {
-  return "bfbs";
 }
 
 inline void Finishobj_msgBuffer(

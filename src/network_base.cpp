@@ -165,8 +165,8 @@ void send_cbot_obj_pos2d(EnetContext* enet_context, flatbuffers::FlatBufferBuild
 
 void initialize_obj_pose_message(flatbuffers::FlatBufferBuilder* builder)
 {
-    auto obj_a = Obj::Createobb(*builder, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f);
-    auto obj_b = Obj::Createobb(*builder, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f);
-    auto obj_obb_msg = Obj::Createobj_msg(*builder, obj_a, obj_b);
-    builder->Finish(obj_obb_msg);    
+    std::vector<::flatbuffers::Offset<Obj::obb>> objs;
+    auto vec = builder->CreateVector(objs);
+    auto obj_obb_msg = Obj::Createobj_msg(*builder, vec);
+    builder->Finish(obj_obb_msg);
 }

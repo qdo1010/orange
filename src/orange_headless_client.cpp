@@ -301,11 +301,10 @@ int main(int argc, char *argv[]) {
                             // Verification passed - try to access obj_msg-specific fields to confirm
                             auto obj_msg_check = Obj::Getobj_msg(buffer_pointer);
                             if (obj_msg_check) {
-                                // obj_msg has cylinder1 and cylinder2 - Server messages don't have these
-                                // Try to access these fields - if successful, it's definitely obj_msg
-                                auto cyl1 = obj_msg_check->cylinder1();
-                                auto cyl2 = obj_msg_check->cylinder2();
-                                // If we can access these (even if null), it's obj_msg
+                                // obj_msg has an objects vector - Server messages don't.
+                                // Accessing it (even if null) marks this as obj_msg.
+                                auto objs = obj_msg_check->objects();
+                                (void)objs;
                                 is_obj_msg = true;
                             } else {
                                 // Verification passed but Getobj_msg returned null - still treat as obj_msg
@@ -323,8 +322,8 @@ int main(int argc, char *argv[]) {
                             auto obj_msg_check = Obj::Getobj_msg(buffer_pointer);
                             if (obj_msg_check) {
                                 // Try to access obj_msg-specific fields
-                                auto cyl1 = obj_msg_check->cylinder1();
-                                auto cyl2 = obj_msg_check->cylinder2();
+                                auto objs = obj_msg_check->objects();
+                                (void)objs;
                                 // If we can access these fields without crashing, it's likely obj_msg
                                 // But we need Server verification to fail to be sure
                                 ::flatbuffers::Verifier server_verifier(buffer_pointer, packet_size);

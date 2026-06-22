@@ -182,6 +182,32 @@ void load_camera_json_config_files(std::string file_name,
     } else {
         std::cout << "OBB obb_bg_frames not found in config, using default: " << camera_select->obb_bg_frames << std::endl;
     }
+
+    if (camera_config.contains("arena_polygon")) {
+        camera_select->arena_polygon.clear();
+        for (const auto &pt : camera_config["arena_polygon"]) {
+            if (pt.is_array() && pt.size() >= 2) {
+                camera_select->arena_polygon.push_back((float)pt[0]);
+                camera_select->arena_polygon.push_back((float)pt[1]);
+            }
+        }
+        std::cout << "Arena polygon: " << camera_select->arena_polygon.size() / 2
+                  << " points" << std::endl;
+    } else {
+        std::cout << "Arena polygon not in config; will auto-detect arena"
+                  << std::endl;
+    }
+
+    if (camera_config.contains("min_confidence")) {
+        camera_select->min_confidence = camera_config["min_confidence"];
+        std::cout << "Min confidence: " << camera_select->min_confidence
+                  << std::endl;
+    }
+    if (camera_config.contains("min_brightness")) {
+        camera_select->min_brightness = camera_config["min_brightness"];
+        std::cout << "Min brightness: " << camera_select->min_brightness
+                  << std::endl;
+    }
     std::cout << "=== End OBB Config Loading Debug ===" << std::endl;
 }
 

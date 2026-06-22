@@ -36,7 +36,14 @@ class COpenGLDisplay : public CThreadWorker {
     float *d_points = nullptr;
     unsigned int *d_skeleton = nullptr;
     unsigned int *d_resize = nullptr;
+    float *d_box_points = nullptr;  // GPU buffer for axis-aligned box corners
     
+    // Arena ROI gating: the arena is a large static grey rectangle. Detect it
+    // once, then reject any detection whose center falls outside it (rejects
+    // reflections and other off-arena false positives).
+    std::vector<cv::Point> arena_poly;
+    bool arena_detected = false;
+
     // OBB Detection
     OBBDetector *obb_detector = nullptr;
     float *d_obb_points = nullptr;  // GPU buffer for OBB corner points
