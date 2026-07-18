@@ -212,9 +212,13 @@ void COpenGLDisplay::ThreadRunning() {
         cudaMalloc((void **)&d_box_points, sizeof(float) * 8);
     }
     
-    // Allocate OBB GPU resources if needed
-    const bool obb_overlay_enabled =
-        (camera_select->enable_obb && obb_detector && yolo_glthread_enabled);
+    // Allocate OBB GPU resources if needed.
+    // OBB refinement DISABLED: cbot uses the CURRICULUM angle (not the detected angle),
+    // so the 2-stage OBB fitting is unnecessary. Its worker thread also races the main
+    // loop (get_latest_detections vs the worker) which can delay/drop detections for the
+    // whole frame -- including the mouse. Force off so ALL classes are sent as raw YOLO
+    // axis-aligned boxes straight through.
+    const bool obb_overlay_enabled = false;
     if (camera_select->enable_obb && obb_detector && !yolo_glthread_enabled) {
         std::cerr << "COpenGLDisplay: OBB detector is running but will not receive "
                      "YOLO boxes until detect mode is Detect2D_GLThread."
@@ -339,8 +343,14 @@ void COpenGLDisplay::ThreadRunning() {
                         bool ok_conf =
                             (camera_select->min_confidence <= 0.0f) ||
                             (b.prob >= camera_select->min_confidence);
+                        // Arena ROI gate is a rectangle tuned to suppress
+                        // reflections off the old square TABLE. It is OFF by
+                        // default because on a CIRCLE arena the rectangle clips
+                        // ~75% of the circular edge and rejects rim mice. Set
+                        // "use_arena_gate": true in the config for square-table rigs.
                         bool ok_arena = true;
-                        if (arena_detected && !arena_poly.empty()) {
+                        if (camera_select->use_arena_gate && arena_detected &&
+                            !arena_poly.empty()) {
                             cv::Point2f ctr(b.rect.x + b.rect.width * 0.5f,
                                             b.rect.y + b.rect.height * 0.5f);
                             ok_arena =
@@ -348,7 +358,11 @@ void COpenGLDisplay::ThreadRunning() {
                         }
                         float bright = -1.0f;
                         bool ok_bright = true;
-                        if (camera_select->min_brightness > 0.0f) {
+                        // Brightness gate suppresses bright-cylinder false
+                        // positives -- but the mouse is a DARK object, so applying
+                        // it to Mouse would always reject the animal. Skip Mouse.
+                        if (camera_select->min_brightness > 0.0f &&
+                            b.label != DET_MOUSE) {
                             bright = box_mean_brightness(
                                 debayer.d_debayer, camera_params->width,
                                 camera_params->height, b.rect);

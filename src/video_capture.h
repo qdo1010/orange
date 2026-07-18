@@ -79,6 +79,11 @@ struct CameraEachSelect {
     float min_confidence = 0.0f;
     float min_brightness = 0.0f;
 
+    // Arena ROI gate: reject detections whose center is outside arena_polygon.
+    // OFF by default -- it is a rectangle meant for the old square TABLE and
+    // clips a CIRCLE arena. Set "use_arena_gate": true only for square rigs.
+    bool use_arena_gate = false;
+
     // Tracks which focus_test_generation was last processed post-recording
     int focus_test_gen_processed{0};
 

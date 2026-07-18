@@ -539,7 +539,7 @@ void YOLOv8::postprocess(std::vector<Bbox> &objs) {
         auto &height = this->pparam.height;
         auto &ratio = this->pparam.ratio;
 
-        constexpr float kConfThreshold = 0.25f;
+        constexpr float kConfThreshold = 0.15f;   // lowered per request
         for (int i = 0; i < n; i++) {
             const float x0_raw = read_as_float(out_ptr, out_type, i * stride + 0);
             const float y0_raw = read_as_float(out_ptr, out_type, i * stride + 1);

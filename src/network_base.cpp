@@ -1,5 +1,12 @@
 #include "network_base.h"
 #include "obj_generated.h"
+#include <mutex>
+
+// enet is NOT thread-safe. The server host is serviced on the enet thread
+// (enet_host_service in service_network) while the display thread sends detections
+// (enet_peer_send in send_cbot_obj_pos2d). Concurrent mutation of the peer's command
+// queues double-frees the heap. Serialize all enet host/peer ops on this mutex.
+static std::mutex g_enet_mtx;
 
 bool enet_initialize(EnetContext* enet_context, uint16_t external_port_number, size_t max_peers)
 {
@@ -100,10 +107,15 @@ void service_network(EnetContext* enet_context, float dt, std::function<void(con
 {
     if (enet_context->m_pNetwork != NULL)
     {
-        //Handle all incoming packets & send any packets awaiting dispatch
+        //Handle all incoming packets & send any packets awaiting dispatch. enet_host_service
+        //is locked (races with enet_peer_send on the display thread); the callback runs
+        //OUTSIDE the lock (it owns the dequeued packet) to avoid blocking senders.
         ENetEvent event;
-        while (enet_host_service(enet_context->m_pNetwork, &event, 0) > 0)
+        while (true)
         {
+            int r;
+            { std::lock_guard<std::mutex> lk(g_enet_mtx); r = enet_host_service(enet_context->m_pNetwork, &event, 0); }
+            if (r <= 0) break;
             callback(event);
         }
 
@@ -114,6 +126,7 @@ void service_network(EnetContext* enet_context, float dt, std::function<void(con
         {
             enet_context->m_SecondTimer = 0.0f;
 
+            std::lock_guard<std::mutex> lk(g_enet_mtx);
             enet_context->m_IncomingKb = float(enet_context->m_pNetwork->totalReceivedData / 128.0); // - 8 bits in a byte and 1024 bits in a KiloBit
             enet_context->m_OutgoingKb = float(enet_context->m_pNetwork->totalSentData / 128.0);
             enet_context->m_pNetwork->totalReceivedData = 0;
@@ -139,7 +152,8 @@ void send_indigo_message(EnetContext* enet_context, flatbuffers::FlatBufferBuild
     int server_buf_size = builder->GetSize();
     ENetPacket* enet_packet = enet_packet_create(server_buffer, server_buf_size, 0);
 
-    enet_peer_send(indigo_connection, 0, enet_packet);
+    std::lock_guard<std::mutex> lk(g_enet_mtx);   // serialize with the enet-thread's host_service
+    if (enet_peer_send(indigo_connection, 0, enet_packet) < 0) enet_packet_destroy(enet_packet);
 }
 
 
@@ -157,9 +171,19 @@ void send_cbot_obj_pos2d(EnetContext* enet_context, flatbuffers::FlatBufferBuild
         return;
     }
     
-    ENetPacket* enet_packet = enet_packet_create(pose_msg_buffer, pose_msg_buf_size, 0);
+    // RELIABLE (was flag 0 = unreliable-sequenced). A continuous flag-0 stream wraps
+    // enet's 16-bit unreliableSequenceNumber after 65536 packets and the receiver then
+    // drops EVERY later packet as "older" -> cbot freezes on the last detection (seen as
+    // the brown block sticking while lime keeps detecting). Reliable sequence numbers
+    // handle the wrap correctly, so the stream keeps flowing. (We tried UNSEQUENCED but
+    // that path double-frees here; reliable is enet's well-tested path.) On localhost at
+    // this packet size the reliable window never backs up.
+    ENetPacket* enet_packet = enet_packet_create(pose_msg_buffer, pose_msg_buf_size, ENET_PACKET_FLAG_RELIABLE);
     if (enet_packet) {
-        enet_peer_send(cbot_connection, 0, enet_packet);
+        std::lock_guard<std::mutex> lk(g_enet_mtx);   // serialize with the enet-thread's host_service
+        if (enet_peer_send(cbot_connection, 0, enet_packet) < 0) {
+            enet_packet_destroy(enet_packet);   // queue full / send failed -> free (enet doesn't on failure)
+        }
     }
 }
 

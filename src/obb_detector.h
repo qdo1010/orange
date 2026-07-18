@@ -18,9 +18,9 @@
 // Forward-declare YOLO bounding box (defined in common.hpp)
 struct Bbox;
 
-// Class-id convention for the 3-class detect model
-// (engine trained in TrainYOLO/data/combined_det_3class):
-//   Mouse + VertCyl -> plain axis-aligned box; SideCyl -> 2-stage OBB.
+// Class-id convention. The deployed model is now 2-CLASS (Mouse + SideCyl); VertCyl
+// is placed from the curriculum, not detected, so it is never emitted or drawn.
+// DET_VERTCYL is kept only for backward compat; the 2-class engine never outputs it.
 enum DetClass { DET_MOUSE = 0, DET_SIDECYL = 1, DET_VERTCYL = 2 };
 
 struct OBB {

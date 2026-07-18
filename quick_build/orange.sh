@@ -4,9 +4,15 @@ PARENT_DIR="$(dirname "$DIR")"
 cd $PARENT_DIR
 targets_folder=$PARENT_DIR/targets
 
+# Pin CUDA 11.7: opencv (libopencv_cudaarithm) on this machine is built against
+# CUDA 11.7 npp (libnpp*.so.11). /usr/local/cuda points at 12.0, so building with
+# the default toolchain links libnpp*.so.12 -> two npp versions load at runtime ->
+# heap corruption ("double free or corruption"). Pinning 11.7 keeps npp consistent.
+CUDA_DIR=/usr/local/cuda-11.7
+
 mkdir -p $targets_folder
 rm -f $targets_folder/orange
-nvcc -c src/kernel.cu -arch=sm_80 -o $targets_folder/kernel.o
+$CUDA_DIR/bin/nvcc -c src/kernel.cu -arch=sm_80 -o $targets_folder/kernel.o
 
 DIR_FFMPEG=$HOME/nvidia/ffmpeg
 DIR_TENSORRT=$HOME/nvidia/TensorRT
@@ -39,13 +45,13 @@ g++ -Ofast -ffast-math -std=c++17 $targets_folder/*.o \
     -I$DIR_FILEBROWSER \
     -I$DIR_ICONFONT \
     -I./src/NvEncoder/ ./src/NvEncoder/*.cpp \
-    -I./nvenc_api/include -I/opt/EVT/eSDK/include/ -I/usr/local/cuda/include \
+    -I./nvenc_api/include -I/opt/EVT/eSDK/include/ -I$CUDA_DIR/include \
     -L/opt/EVT/eSDK/lib/ -lEmergentCamera  -lEmergentGenICam  -lEmergentGigEVision \
     -lm \
     -lpthread \
     -I./third_party/flatbuffers/include \
     -lenet -I/usr/local/include/ \
-    -L/usr/local/cuda/lib64/ -lcudart -lcuda -lnppicc -lnppidei -lnvidia-encode -lnppc -lnppig -lnppial \
+    -L$CUDA_DIR/lib64/ -lcudart -lcuda -lnppicc -lnppidei -lnvidia-encode -lnppc -lnppig -lnppial \
     -lGLEW -lGL \
     -I$DIR_FFMPEG/build/include/ \
     -L$DIR_FFMPEG/build/lib/ -lavformat -lswscale -lswresample -lavutil -lavcodec \

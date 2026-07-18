@@ -208,6 +208,11 @@ void load_camera_json_config_files(std::string file_name,
         std::cout << "Min brightness: " << camera_select->min_brightness
                   << std::endl;
     }
+    if (camera_config.contains("use_arena_gate")) {
+        camera_select->use_arena_gate = camera_config["use_arena_gate"];
+        std::cout << "Use arena gate: " << camera_select->use_arena_gate
+                  << std::endl;
+    }
     std::cout << "=== End OBB Config Loading Debug ===" << std::endl;
 }
 
