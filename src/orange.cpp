@@ -30,6 +30,7 @@ static bool g_stream_mode = false;
 struct RemoteCamInfo {
     std::string serial;
     int focus;
+    int iris;
     bool selected;
 };
 static std::vector<RemoteCamInfo> g_remote_cams;
@@ -242,7 +243,14 @@ int main(int argc, char **args) {
                     ImGui::SameLine();
             }
 
-            if (!camera_control->open &&
+            if (cam_count == 0) {
+                ImGui::TextColored(
+                    ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
+                    "No local cameras found - power on cameras "
+                    "(climb_task_hw_all_on), then restart this app");
+            }
+
+            if (cam_count > 0 && !camera_control->open &&
                 my_servers[0].server_state == FetchGame::ManagerState_IDLE &&
                 my_servers[1].server_state == FetchGame::ManagerState_IDLE &&
                 my_servers[0].connected && my_servers[1].connected) {
@@ -262,6 +270,7 @@ int main(int argc, char **args) {
                         RemoteCamInfo rc;
                         rc.serial = j.value("name", "");
                         rc.focus = j.value("focus", 300);
+                        rc.iris = j.value("iris", 0);
                         rc.selected = false;
                         if (!rc.serial.empty())
                             g_remote_cams.push_back(rc);
@@ -401,7 +410,9 @@ int main(int argc, char **args) {
                 my_servers[1].server_state ==
                     FetchGame::ManagerState_WAITSTART) {
                 // check network servers are ready as well as local computer
-                if (ptp_params->ptp_counter == num_cameras) {
+                // num_cameras > 0: the handlers below read ecams[0] for PTP
+                // time, which doesn't exist when no local camera was found
+                if (num_cameras > 0 && ptp_params->ptp_counter == num_cameras) {
                     ImGui::PushStyleColor(ImGuiCol_Button,
                                           ImVec4{0, 0.5f, 0, 1.0f});
                     ImGui::SameLine();
@@ -544,6 +555,48 @@ int main(int argc, char **args) {
                         ImGui::Text("Set focus then start recording "
                                     "to see preview");
                     }
+
+                    // Iris control: stop down to cut light (fixes white/blown
+                    // frames) and deepen depth of field for a sharper image.
+                    ImGui::SetNextItemWidth(300);
+                    char ilbl[64];
+                    snprintf(ilbl, sizeof(ilbl), "Iris %s",
+                             rc.serial.c_str());
+                    ImGui::SliderInt(ilbl, &rc.iris, 0, 100);
+                    ImGui::SameLine();
+                    static bool waiting_iris_preview = false;
+                    if (ImGui::Button("Set Iris & Preview")) {
+                        // Send to dosa0/dosa1
+                        host_broadcast_setiris(fb_builder, &server,
+                                               rc.serial.c_str(), rc.iris);
+                        // Also apply to local cameras on this machine
+                        if (cameras_params && ecams && camera_control) {
+                            for (int li = 0; li < num_cameras; li++) {
+                                if (cameras_params[li].camera_serial ==
+                                    rc.serial) {
+                                    update_iris_value(&ecams[li].camera,
+                                                      rc.iris,
+                                                      &cameras_params[li]);
+                                    // Trigger local camera thread to grab
+                                    // preview
+                                    camera_control->setiris.iris_value =
+                                        rc.iris;
+                                    camera_control->setiris.camera_serial =
+                                        rc.serial;
+                                    camera_control->setiris.generation
+                                        .fetch_add(1);
+                                    printf("SETIRIS local cam %s iris=%d\n",
+                                           rc.serial.c_str(), rc.iris);
+                                    fflush(stdout);
+                                }
+                            }
+                        }
+                        waiting_iris_preview = true;
+                    }
+                    if (waiting_iris_preview) {
+                        ImGui::Text("Waiting for iris preview... "
+                                    "(start recording for IR light)");
+                    }
                 }
             }
 
@@ -601,6 +654,9 @@ int main(int argc, char **args) {
             }
             camera_control->sync_camera = false;
             camera_control->record_video = false;
+            // Without this, "Clients start camera threads" (gated on
+            // !subscribe) never reappears for a second recording cycle
+            camera_control->subscribe = false;
 
             ptp_params->ptp_global_time = 0;
             ptp_params->ptp_stop_time = 0;
@@ -1578,7 +1634,8 @@ int main(int argc, char **args) {
             ImGui::EndPopup();
         }
 
-        // Pick up local camera preview (no ENet needed)
+        // Pick up local camera preview (no ENet needed) -- from either a
+        // focus or an iris "Set & Preview" request.
         if (camera_control) {
             std::vector<uint8_t> local_jpg;
             {
@@ -1587,6 +1644,14 @@ int main(int argc, char **args) {
                 if (camera_control->setfocus.reply_ready) {
                     local_jpg = camera_control->setfocus.reply_jpeg;
                     camera_control->setfocus.reply_ready = false;
+                }
+            }
+            if (local_jpg.empty()) {
+                std::lock_guard<std::mutex> lk(
+                    camera_control->setiris.reply_mu);
+                if (camera_control->setiris.reply_ready) {
+                    local_jpg = camera_control->setiris.reply_jpeg;
+                    camera_control->setiris.reply_ready = false;
                 }
             }
             if (!local_jpg.empty()) {

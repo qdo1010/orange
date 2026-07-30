@@ -9,7 +9,8 @@ enum ServerControl : byte {
     QUIT,
     TESTFOCUS,
     SETFOCUS,
-    STARTSTREAM
+    STARTSTREAM,
+    SETIRIS
 }
 
 enum SignalType: byte {
@@ -53,6 +54,7 @@ table Server {
     server_state:ManagerState = IDLE;
     focus_value:int;
     camera_serial:string;
+    iris_value:int;
 }
 
 root_type Server;

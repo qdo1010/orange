@@ -26,6 +26,20 @@ struct SetFocusRequest {
     ENetPeer *reply_peer{nullptr};
 };
 
+// Pending remote iris + frame grab request. Mirrors SetFocusRequest: stopping
+// down the iris cuts incoming light (fixes blown-out/white frames) and deepens
+// depth of field for a sharper image.
+struct SetIrisRequest {
+    std::atomic<int> generation{0};
+    int iris_value{0};
+    std::string camera_serial;
+    // Reply: camera thread writes JPEG here, ENet thread sends it
+    std::mutex reply_mu;
+    std::vector<uint8_t> reply_jpeg;
+    bool reply_ready{false};
+    ENetPeer *reply_peer{nullptr};
+};
+
 struct CameraControl {
     bool open = false;
     bool subscribe = false;
@@ -35,6 +49,7 @@ struct CameraControl {
     bool trigger_mode = false;
     std::atomic<int> focus_test_generation{0};
     SetFocusRequest setfocus;
+    SetIrisRequest setiris;
 };
 
 enum DetectMode {

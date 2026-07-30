@@ -639,3 +639,21 @@ void host_broadcast_setfocus(flatbuffers::FlatBufferBuilder *builder,
         enet_packet_create(server_buffer, server_buf_size, 0);
     enet_host_broadcast(server->m_pNetwork, 0, enet_packet);
 }
+
+void host_broadcast_setiris(flatbuffers::FlatBufferBuilder *builder,
+                            EnetContext *server, const char *serial,
+                            int iris_value) {
+    builder->Clear();
+    auto serial_off = builder->CreateString(serial);
+    FetchGame::ServerBuilder server_builder(*builder);
+    server_builder.add_control(FetchGame::ServerControl_SETIRIS);
+    server_builder.add_iris_value(iris_value);
+    server_builder.add_camera_serial(serial_off);
+    auto my_server = server_builder.Finish();
+    builder->Finish(my_server);
+    uint8_t *server_buffer = builder->GetBufferPointer();
+    int server_buf_size = builder->GetSize();
+    ENetPacket *enet_packet =
+        enet_packet_create(server_buffer, server_buf_size, 0);
+    enet_host_broadcast(server->m_pNetwork, 0, enet_packet);
+}

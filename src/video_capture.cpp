@@ -280,6 +280,26 @@ void start_ptp_sync(PTPState *ptp_state, PTPParams *ptp_params,
                 }
             }
 
+            // Handle SETIRIS: apply iris + grab one frame for preview
+            if (camera_control) {
+                thread_local int si_gen_seen = 0;
+                int si_gen = camera_control->setiris.generation.load();
+                if (si_gen > si_gen_seen &&
+                    camera_control->setiris.camera_serial ==
+                        camera_params->camera_serial) {
+                    si_gen_seen = si_gen;
+                    int iv = camera_control->setiris.iris_value;
+                    printf("SETIRIS cam %s iris=%d step1: update_iris\n",
+                           camera_params->camera_serial.c_str(), iv);
+                    fflush(stdout);
+                    update_iris_value(&ecam->camera, iv, camera_params);
+                    printf("SETIRIS cam %s iris=%d applied "
+                           "(preview will come from next recording)\n",
+                           camera_params->camera_serial.c_str(), iv);
+                    fflush(stdout);
+                }
+            }
+
             usleep(10);
         }
         ptp_state->ptp_time = get_current_PTP_time(&ecam->camera);
@@ -495,6 +515,58 @@ inline void get_one_frame(CameraState *camera_state,
                     camera_control->setfocus.reply_jpeg = std::move(jpeg);
                     camera_control->setfocus.reply_ready = true;
                     printf("SETFOCUS cam %s preview captured\n",
+                           camera_params->camera_serial.c_str());
+                    fflush(stdout);
+                }
+            }
+        }
+
+        // SETIRIS: apply iris, wait for motor to settle, then grab preview.
+        // Skip during recording -- camera API calls and cudaMemcpy2D stall
+        // the capture thread and cause frame drops.
+        if (camera_control &&
+            !(camera_control->record_video && camera_select->record)) {
+            thread_local int si_rec_gen = 0;
+            thread_local int si_wait_frames = 0;
+
+            int sg = camera_control->setiris.generation.load();
+            if (sg > si_rec_gen &&
+                camera_control->setiris.camera_serial ==
+                    camera_params->camera_serial) {
+                si_rec_gen = sg;
+                // Apply iris now, grab preview after motor settles
+                int requested_iris = camera_control->setiris.iris_value;
+                update_iris_value(&ecam->camera, requested_iris,
+                                  camera_params);
+                // Read back actual iris to verify motor moved
+                unsigned int actual_iris = 0;
+                EVT_CameraGetUInt32Param(&ecam->camera, "Iris",
+                                         &actual_iris);
+                si_wait_frames = 30; // wait ~30 frames for motor
+                printf("SETIRIS cam %s set=%d actual=%u waiting %d frames\n",
+                       camera_params->camera_serial.c_str(),
+                       requested_iris, actual_iris, si_wait_frames);
+                fflush(stdout);
+            }
+
+            if (si_wait_frames > 0) {
+                si_wait_frames--;
+                if (si_wait_frames == 0) {
+                    auto jpeg = make_preview_jpeg(
+                        (const unsigned char *)ecam->frame_recv.imagePtr,
+                        camera_params->width, camera_params->height,
+                        camera_params->gpu_direct);
+                    FILE *fp = fopen(
+                        "/home/ratan/orange_data/remote_preview.jpg", "wb");
+                    if (fp) {
+                        fwrite(jpeg.data(), 1, jpeg.size(), fp);
+                        fclose(fp);
+                    }
+                    std::lock_guard<std::mutex> lk(
+                        camera_control->setiris.reply_mu);
+                    camera_control->setiris.reply_jpeg = std::move(jpeg);
+                    camera_control->setiris.reply_ready = true;
+                    printf("SETIRIS cam %s preview captured\n",
                            camera_params->camera_serial.c_str());
                     fflush(stdout);
                 }

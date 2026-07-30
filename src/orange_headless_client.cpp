@@ -68,9 +68,13 @@ bool start_camera_thread(std::vector<std::thread> &camera_threads,
     camera_control->subscribe = true;
     camera_control->sync_camera = true;
 
-    // Creating a directory to save recorded video;
-    if (mkdir(record_folder.c_str(), 0777) == -1) {
-        std::cerr << "Error :  " << std::strerror(errno) << std::endl;
+    // Creating a directory to save recorded video; recursive so a "Save to"
+    // path picked on the GUI machine doesn't need to pre-exist on this rig.
+    std::error_code mkdir_ec;
+    std::filesystem::create_directories(record_folder, mkdir_ec);
+    if (mkdir_ec) {
+        std::cerr << "Error creating record folder '" << record_folder
+                  << "': " << mkdir_ec.message() << std::endl;
         return false;
     } else {
         std::cout << "Recorded video saves to : " << record_folder << std::endl;
@@ -145,6 +149,13 @@ void create_camera_manager(int *cam_count, ManagerContext *manager_context,
             manager_context->state = FetchGame::ManagerState_CONNECTED;
             break;
         case FetchGame::ManagerState_OPENCAMERA:
+            if (*cam_count == 0) {
+                std::cerr << "OPENCAMERA: no cameras enumerated on this rig "
+                             "- check camera power/network"
+                          << std::endl;
+                manager_context->state = FetchGame::ManagerState_ERROR;
+                break;
+            }
             ecams = new CameraEmergent[*cam_count];
             cameras_params = new CameraParams[*cam_count];
             cameras_select = new CameraEachSelect[*cam_count];
@@ -172,7 +183,7 @@ void create_camera_manager(int *cam_count, ManagerContext *manager_context,
             }
             break;
         case FetchGame::ManagerState_ERROR:
-            quit_server = true;
+            // Main network loop sees ERROR, notifies the GUI, then quits.
             break;
         }
 
@@ -298,17 +309,18 @@ int main(int argc, char *argv[]) {
                     try {
                         ::flatbuffers::Verifier verifier(buffer_pointer, packet_size);
                         if (Obj::Verifyobj_msgBuffer(verifier)) {
-                            // Verification passed - try to access obj_msg-specific fields to confirm
-                            auto obj_msg_check = Obj::Getobj_msg(buffer_pointer);
-                            if (obj_msg_check) {
-                                // obj_msg has an objects vector - Server messages don't.
-                                // Accessing it (even if null) marks this as obj_msg.
-                                auto objs = obj_msg_check->objects();
-                                (void)objs;
+                            // A valid Server control message can ALSO pass obj_msg
+                            // verification (the two schemas overlap structurally),
+                            // so only treat this as obj_msg if it does NOT also
+                            // verify as a Server message. Without this guard, real
+                            // control packets (OPENCAMERA, etc.) get silently
+                            // dropped here. Mirrors the Server-priority check in
+                            // Method 2 below.
+                            ::flatbuffers::Verifier sv(buffer_pointer, packet_size);
+                            if (!FetchGame::VerifyServerBuffer(sv)) {
                                 is_obj_msg = true;
-                            } else {
-                                // Verification passed but Getobj_msg returned null - still treat as obj_msg
-                                is_obj_msg = true;
+                                printf("DROP obj_msg (m1) len=%zu\n", packet_size);
+                                fflush(stdout);
                             }
                         }
                     } catch (...) {
@@ -358,6 +370,8 @@ int main(int argc, char *argv[]) {
                     }
                     
                     if (!is_valid_server) {
+                        printf("DROP invalid_server len=%zu\n", packet_size);
+                        fflush(stdout);
                         enet_packet_destroy(evnt.packet);
                         break;
                     }
@@ -372,7 +386,13 @@ int main(int argc, char *argv[]) {
                     // CRITICAL: Check if control() value is valid BEFORE using it
                     // This is the final safety check - obj_msg messages will have invalid control() values
                     auto server_signal = server_control->control();
-                    if (::flatbuffers::IsOutRange(server_signal, FetchGame::ServerControl_IDLE, FetchGame::ServerControl_STARTSTREAM)) {
+                    printf("RECV Server control=%d len=%zu\n",
+                           (int)server_signal, packet_size);
+                    fflush(stdout);
+                    if (::flatbuffers::IsOutRange(server_signal, FetchGame::ServerControl_IDLE, FetchGame::ServerControl_SETIRIS)) {
+                        printf("DROP out_of_range control=%d\n",
+                               (int)server_signal);
+                        fflush(stdout);
                         enet_packet_destroy(evnt.packet);
                         break;
                     }
@@ -447,6 +467,23 @@ int main(int argc, char *argv[]) {
                             sf.reply_peer = evnt.peer;
                             sf.generation.fetch_add(1);
                         }
+                    } else if (server_signal ==
+                               FetchGame::ServerControl_SETIRIS) {
+                        int iv = server_control->iris_value();
+                        const char *serial =
+                            server_control->camera_serial()
+                                ? server_control->camera_serial()->c_str()
+                                : "";
+                        printf("SETIRIS %s -> %d\n", serial, iv);
+                        // Store the request — the camera thread in
+                        // start_ptp_sync will pick it up safely.
+                        if (manager_context.camera_control) {
+                            auto &si = manager_context.camera_control->setiris;
+                            si.iris_value = iv;
+                            si.camera_serial = serial;
+                            si.reply_peer = evnt.peer;
+                            si.generation.fetch_add(1);
+                        }
                     }
                     enet_packet_destroy(evnt.packet);
                 } break;
@@ -476,6 +513,14 @@ int main(int argc, char *argv[]) {
             client_send_state_update_message(&client, fb_builder,
                                              &client.m_pNetwork->peers[0],
                                              manager_context.state);
+        } else if (manager_context.state == FetchGame::ManagerState_ERROR) {
+            std::cerr << "Camera manager ERROR - notifying GUI and exiting"
+                      << std::endl;
+            client_send_state_update_message(&client, fb_builder,
+                                             &client.m_pNetwork->peers[0],
+                                             manager_context.state);
+            enet_host_flush(client.m_pNetwork);
+            quit_server = true;
         } else if (manager_context.state ==
                    FetchGame::ManagerState_RECORDSTOPPED) {
             if (!ptp_params->network_set_start_ptp &&
@@ -518,6 +563,25 @@ int main(int argc, char *argv[]) {
                 enet_host_flush(client.m_pNetwork);
                 sf.reply_ready = false;
                 printf("SETFOCUS preview sent (%zu bytes)\n", jpg.size());
+                fflush(stdout);
+            }
+        }
+
+        // Send SETIRIS preview reply if ready
+        if (manager_context.camera_control) {
+            auto &si = manager_context.camera_control->setiris;
+            std::lock_guard<std::mutex> lk(si.reply_mu);
+            if (si.reply_ready && si.reply_peer) {
+                auto &jpg = si.reply_jpeg;
+                std::vector<uint8_t> pkt(4 + jpg.size());
+                memcpy(pkt.data(), "JPGF", 4);
+                memcpy(pkt.data() + 4, jpg.data(), jpg.size());
+                ENetPacket *ep = enet_packet_create(
+                    pkt.data(), pkt.size(), ENET_PACKET_FLAG_RELIABLE);
+                enet_peer_send(si.reply_peer, 0, ep);
+                enet_host_flush(client.m_pNetwork);
+                si.reply_ready = false;
+                printf("SETIRIS preview sent (%zu bytes)\n", jpg.size());
                 fflush(stdout);
             }
         }

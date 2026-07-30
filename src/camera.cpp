@@ -242,6 +242,19 @@ void update_iris_value(Emergent::CEmergentCamera *camera, int iris_value,
         iris_value <= camera_params->iris_max) {
         EVT_CameraSetUInt32Param(camera, "Iris", iris_value);
         camera_params->iris = iris_value;
+        printf("Iris cam %s set to %d (range %u..%u)\n",
+               camera_params->camera_serial.c_str(), iris_value,
+               camera_params->iris_min, camera_params->iris_max);
+        fflush(stdout);
+    } else {
+        // Out-of-range values are silently ignored by the camera, leaving the
+        // iris at its power-on default (often wide open -> blown-out frame).
+        // Log loudly so a new lens with a different iris range is obvious.
+        printf("WARNING: iris cam %s value %d OUT OF RANGE [%u..%u] -- NOT "
+               "applied; iris left at hardware default\n",
+               camera_params->camera_serial.c_str(), iris_value,
+               camera_params->iris_min, camera_params->iris_max);
+        fflush(stdout);
     }
 }
 
