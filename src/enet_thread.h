@@ -2,10 +2,39 @@
 #include "network_base.h"
 #include "imgui.h"
 #include "global.h"
+#include <chrono>
 
 void create_enet_thread(EnetContext* server, ConnectedServer* my_servers, INDIGOSignalBuilder* indigo_signal_builder, bool* quit_enet, bool* cbot_trigger_stop_recording)
 {
+    auto last_pose_send = std::chrono::steady_clock::now();
+    uint64_t last_pose_seq = 0;
     while(!(*quit_enet)) {
+        // forward the latest yolo detections to indigo (~5 Hz, channel 1)
+        auto now = std::chrono::steady_clock::now();
+        if (indigo_signal_builder->indigo_connection != nullptr &&
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - last_pose_send).count() >= 200) {
+
+            DetectedPose ball, mouse;
+            uint64_t seq;
+            {
+                const std::lock_guard<std::mutex> lock(g_detected_poses.mtx);
+                ball = g_detected_poses.ball;
+                mouse = g_detected_poses.mouse;
+                seq = g_detected_poses.seq;
+            }
+            if (seq != last_pose_seq && (ball.valid || mouse.valid)) {
+                send_indigo_ball_pose(indigo_signal_builder->indigo_connection,
+                                      ball.valid ? ball.x : -1000.0f,
+                                      ball.valid ? ball.y : -1000.0f,
+                                      ball.prob,
+                                      mouse.valid ? mouse.x : -1000.0f,
+                                      mouse.valid ? mouse.y : -1000.0f,
+                                      mouse.prob);
+                last_pose_seq = seq;
+            }
+            last_pose_send = now;
+        }
+
         service_network(server, ImGui::GetIO().DeltaTime, [&](const ENetEvent& evnt)
         {
             switch (evnt.type)

@@ -42,6 +42,9 @@ void send_indigo_message(EnetContext* enet_context, flatbuffers::FlatBufferBuild
                         ENetPeer* indigo_connection, FetchGame::SignalType signal_type);
 void send_indigo_obj_pose2d(EnetContext* enet_context, flatbuffers::FlatBufferBuilder* builder,
                         ENetPeer* indigo_connection);
+void send_indigo_ball_pose(ENetPeer* indigo_connection,
+                        float x_ball, float y_ball, float prob_ball,
+                        float x_mouse, float y_mouse, float prob_mouse);
 
 void initialize_obj_pose_message(flatbuffers::FlatBufferBuilder* builder);
 

@@ -9,7 +9,7 @@ bool enet_initialize(EnetContext* enet_context, uint16_t external_port_number, s
     enet_context->m_pNetwork = enet_host_create(
         (external_port_number == 0) ? NULL : &address,	//the address at which other peers may connect to this host. If NULL, then no peers may connect to the host.
         max_peers,												//the maximum number of peers that should be allocated for the host.
-        1,												//the maximum number of channels allowed; if 0, then this is equivalent to ENET_PROTOCOL_MAXIMUM_CHANNEL_COUNT
+        2,												//channel 0: FetchGame signals, channel 1: ObjPose ball/mouse positions
         0,												//downstream bandwidth of the host in bytes/second; if 0, ENet will assume unlimited bandwidth.
         0);												//upstream bandwidth of the host in bytes/second; if 0, ENet will assume unlimited bandwidth.
 
@@ -139,6 +139,23 @@ void send_indigo_message(EnetContext* enet_context, flatbuffers::FlatBufferBuild
     ENetPacket* enet_packet = enet_packet_create(server_buffer, server_buf_size, 0);
 
     enet_peer_send(indigo_connection, 0, enet_packet);
+}
+
+// build and send the latest ball/mouse detections (image pixels) to indigo on
+// channel 1; undetected objects carry the -1000 sentinel in x/y
+void send_indigo_ball_pose(ENetPeer* indigo_connection,
+                           float x_ball, float y_ball, float prob_ball,
+                           float x_mouse, float y_mouse, float prob_mouse)
+{
+    static flatbuffers::FlatBufferBuilder pose_builder(256); // only used from the enet thread
+    pose_builder.Clear();
+    auto obj_mouse = ObjPose::Createpose2d(pose_builder, x_mouse, y_mouse, 0.0f, prob_mouse, 0.0f);
+    auto obj_ball = ObjPose::Createpose2d(pose_builder, x_ball, y_ball, 0.0f, prob_ball, 1.0f);
+    auto obj_pose_msg = ObjPose::Createobj_pose_msg(pose_builder, obj_mouse, obj_ball);
+    pose_builder.Finish(obj_pose_msg);
+
+    ENetPacket* enet_packet = enet_packet_create(pose_builder.GetBufferPointer(), pose_builder.GetSize(), 0);
+    enet_peer_send(indigo_connection, 1, enet_packet);
 }
 
 void send_indigo_obj_pose2d(EnetContext* enet_context, flatbuffers::FlatBufferBuilder* builder,

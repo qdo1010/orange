@@ -6,6 +6,7 @@
 #include "kernel.cuh"
 #include "opengldisplay.h"
 #include <cuda_runtime_api.h>
+#include "global.h"
 
 
 
@@ -138,25 +139,28 @@ void COpenGLDisplay::ThreadRunning()
                 // extract object IDs
                 int id_mouse = -1;
                 int id_ball = -1;
+                float prob_mouse = -1.0;
+                float prob_ball = -1.0;
                 for (int ii =0 ; ii<objs.size(); ii++) {
 
-                    
+
 
                     if(objs[ii].prob >0.65)  { // only check for confident detections
                         switch(objs[ii].label) {
-                            case 0: 
+                            case 0:
                                 //bbox level checks for mouse
                                 if( (max(objs[ii].rect.width, objs[ii].rect.height) <= 300 ) &&
                                     (min(objs[ii].rect.width, objs[ii].rect.height) >= 50  ) )  {
-                                        
+
                                         x_mouse =  objs[ii].rect.x + objs[ii].rect.width/2;;
                                         y_mouse =  objs[ii].rect.y + objs[ii].rect.height/2;
                                         h_mouse = objs[ii].rect.height;
                                         w_mouse = objs[ii].rect.width;
-                                        id_mouse=0; 
+                                        prob_mouse = objs[ii].prob;
+                                        id_mouse=0;
 
                                     }
-                                    
+
                                 break;
                             case 1:
                                 if( (max(objs[ii].rect.width, objs[ii].rect.height) <= 300 ) &&
@@ -164,6 +168,7 @@ void COpenGLDisplay::ThreadRunning()
 
                                         x_ball =  objs[ii].rect.x + objs[ii].rect.width/2;;
                                         y_ball =  objs[ii].rect.y + objs[ii].rect.height/2;
+                                        prob_ball = objs[ii].prob;
                                         id_ball=1;
                                 }
 
@@ -171,6 +176,25 @@ void COpenGLDisplay::ThreadRunning()
                         }
 
                     }
+                }
+
+                // publish latest detections (pixels) for the enet thread to
+                // forward to indigo/cbot
+                {
+                    const std::lock_guard<std::mutex> lock(g_detected_poses.mtx);
+                    g_detected_poses.ball.valid = (id_ball > -1);
+                    if (id_ball > -1) {
+                        g_detected_poses.ball.x = x_ball;
+                        g_detected_poses.ball.y = y_ball;
+                        g_detected_poses.ball.prob = prob_ball;
+                    }
+                    g_detected_poses.mouse.valid = (id_mouse > -1);
+                    if (id_mouse > -1) {
+                        g_detected_poses.mouse.x = x_mouse;
+                        g_detected_poses.mouse.y = y_mouse;
+                        g_detected_poses.mouse.prob = prob_mouse;
+                    }
+                    g_detected_poses.seq++;
                 }
 
                 // check for mouse getting closer to ball
