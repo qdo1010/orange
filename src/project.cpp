@@ -150,7 +150,34 @@ void load_camera_json_config_files(std::string file_name,
     if (camera_config.contains("yolo")) {
         camera_select->yolo_model = camera_config["yolo"];
     }
-    
+    // Second, user-selectable network: native YOLO-OBB engine.
+    if (camera_config.contains("yolo_obb")) {
+        camera_select->yolo_obb_model = camera_config["yolo_obb"];
+        std::cout << "YOLO OBB engine: " << camera_select->yolo_obb_model
+                  << std::endl;
+    }
+    if (camera_config.contains("yolo_net")) {
+        std::string net = camera_config["yolo_net"];
+        if (net == "obb") {
+            camera_select->yolo_net = YoloNet_OBB;
+        } else if (net == "detect") {
+            camera_select->yolo_net = YoloNet_Detect;
+        } else {
+            std::cerr << "Unknown yolo_net '" << net
+                      << "' (expected \"detect\" or \"obb\"); using detect"
+                      << std::endl;
+        }
+        std::cout << "YOLO net: " << YoloNetNames[camera_select->yolo_net]
+                  << std::endl;
+    }
+    if (camera_config.contains("yolo_obb_label_map") &&
+        camera_config["yolo_obb_label_map"].is_array()) {
+        camera_select->yolo_obb_label_map.clear();
+        for (const auto &v : camera_config["yolo_obb_label_map"]) {
+            camera_select->yolo_obb_label_map.push_back((int)v);
+        }
+    }
+
     // Load OBB configuration fields (all optional, defaults used if missing)
     std::cout << "=== OBB Config Loading Debug ===" << std::endl;
     std::cout << "Config file: " << file_name << std::endl;

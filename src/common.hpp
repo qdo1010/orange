@@ -101,12 +101,33 @@ struct Binding {
 };
 
 struct Bbox {
-    cv::Rect_<float> rect;
+    cv::Rect_<float> rect;   // axis-aligned box (image px). For OBB models this is
+                             // the bounding rect of the rotated box.
     int label = 0;
     float prob = 0.0;
     std::vector<float> kps;
     std::vector<float> mask_coeffs;  // 32 mask prototype coefficients (seg models)
+
+    // Native oriented box, filled only by YOLO-OBB engines (has_obb == true).
+    // (cx, cy) center and (rw, rh) size in image px with rw >= rh.
+    // theta_deg: direction of the rw (long) axis in image coordinates
+    // (x right, y down), measured from +x toward +y, in [0, 180).
+    bool has_obb = false;
+    float cx = 0.f, cy = 0.f, rw = 0.f, rh = 0.f;
+    float theta_deg = 0.f;
 };
+
+// Corners of an oriented Bbox as x0,y0,...,x3,y3 (clockwise on screen).
+inline void bbox_obb_corners(const Bbox &b, float out[8]) {
+    const float t = b.theta_deg * (float)M_PI / 180.f;
+    const float c = std::cos(t), s = std::sin(t);
+    const float ax = 0.5f * b.rw * c, ay = 0.5f * b.rw * s;   // half long axis
+    const float bx = -0.5f * b.rh * s, by = 0.5f * b.rh * c;  // half short axis
+    out[0] = b.cx - ax - bx; out[1] = b.cy - ay - by;
+    out[2] = b.cx + ax - bx; out[3] = b.cy + ay - by;
+    out[4] = b.cx + ax + bx; out[5] = b.cy + ay + by;
+    out[6] = b.cx - ax + bx; out[7] = b.cy - ay + by;
+}
 
 struct PreParam {
     float ratio = 1.0f;

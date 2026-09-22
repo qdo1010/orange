@@ -8,11 +8,20 @@ const std::vector<std::string> CLASS_NAMES = {"rat"};
 const std::vector<std::vector<unsigned int>> COLORS = {{255, 0, 255}};
 
 int main(int argc, char **argv) {
-    if (argc != 4) {
-        fprintf(stderr, "Usage: %s [engine_path] [video_path] [gpu_id]\n",
+    if (argc < 4) {
+        fprintf(stderr,
+                "Usage: %s [engine_path] [video_path] [gpu_id] [nogui] [max_frames] [bgr|rgb]\n"
+                "  nogui      : print detections to stdout, no window\n"
+                "  max_frames : stop after this many frames (0 = all)\n"
+                "  bgr|rgb    : channel order fed to the engine (default bgr = old detect\n"
+                "               engines; use rgb for Ultralytics OBB engines, as lime does)\n",
                 argv[0]);
         return -1;
     }
+    const bool headless = (argc >= 5 && std::string(argv[4]) == "nogui");
+    const long max_frames = (argc >= 6) ? std::stol(argv[5]) : 0;
+    const bool feed_rgb = (argc >= 7 && std::string(argv[6]) == "rgb");
+    long frame_idx = 0;
 
     int device_id = std::stoi(argv[3]);
     // cuda:0
@@ -68,6 +77,7 @@ int main(int argc, char **argv) {
     while (cap.read(image)) {
 
         auto start = std::chrono::high_resolution_clock::now();
+        if (feed_rgb) cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
         CHECK(cudaMemcpy(d_frame, (uint8_t *)image.data, frame_size,
                          cudaMemcpyHostToDevice));
         cudaDeviceSynchronize();
@@ -88,6 +98,19 @@ int main(int argc, char **argv) {
             yolov8->infer(); // it sync gpu with cpu here
         }
         yolov8->postprocess(objs);
+        if (headless) {
+            // One line per detection: frame label conf then either
+            // obb cx cy w h theta_deg  or  box x y w h.
+            for (const auto &o : objs) {
+                if (o.has_obb)
+                    printf("det frame=%ld label=%d conf=%.3f obb cx=%.1f cy=%.1f w=%.1f h=%.1f theta=%.1f\n",
+                           frame_idx, o.label, o.prob, o.cx, o.cy, o.rw, o.rh, o.theta_deg);
+                else
+                    printf("det frame=%ld label=%d conf=%.3f box x=%.1f y=%.1f w=%.1f h=%.1f\n",
+                           frame_idx, o.label, o.prob, o.rect.x, o.rect.y, o.rect.width, o.rect.height);
+            }
+            if (objs.empty()) printf("det frame=%ld none\n", frame_idx);
+        }
         yolov8->copy_keypoints_gpu(d_points, objs);
         cudaDeviceSynchronize();
         stop = std::chrono::high_resolution_clock::now();
@@ -108,6 +131,9 @@ int main(int argc, char **argv) {
         int output_h = std::round(camera_height * r);
         cv::resize(view, final_view, cv::Size(output_w, output_h));
 
+        frame_idx++;
+        if (max_frames > 0 && frame_idx >= max_frames) break;
+        if (headless) continue;
         cv::imshow(engine_file_path.c_str(), final_view);
         if (cv::waitKey(10) == 'q') {
             break;

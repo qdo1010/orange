@@ -60,6 +60,15 @@ enum DetectMode {
 };
 constexpr const char *DetectModeNames[] = {"OFF", "2DGLThread", "2DStandoff",
                                            "3DStandoff"};
+
+// Which YOLO engine to run. Detect = the original axis-aligned model
+// ("yolo" config key), OBB = the native oriented-box model ("yolo_obb" key).
+enum YoloNet { YoloNet_Detect = 0, YoloNet_OBB = 1 };
+constexpr const char *YoloNetNames[] = {"Detect (old)", "OBB (new)"};
+// Fallback OBB engine when a camera config has no "yolo_obb" key.
+constexpr const char *kDefaultYoloOBBEngine =
+    "/home/ratan/yolo_model/small_cyl_obb.engine";
+
 struct CameraEachSelect {
     bool stream_on = true;
     bool record = true;
@@ -70,7 +79,19 @@ struct CameraEachSelect {
     int pictures_counter = 0;
     bool selected_to_save = false;
     std::string picture_save_folder;
-    std::string yolo_model;
+    std::string yolo_model;      // config "yolo": axis-aligned detect engine (old)
+    // config "yolo_obb": native OBB engine (new). Defaults to the deployed
+    // small-cylinder engine so the "OBB (new)" dropdown entry works even on
+    // camera configs written before this option existed; the config key wins.
+    std::string yolo_obb_model = kDefaultYoloOBBEngine;
+    YoloNet yolo_net = YoloNet_Detect;  // config "yolo_net": "detect" | "obb"
+    // Class-id remap for the OBB engine: index = network class id, value = the
+    // label cbot expects (0=Mouse, 1=SideCyl, 2=VertCyl). The small-cylinder OBB
+    // dataset is 0=vert_cyl, 1=side_cyl. Config "yolo_obb_label_map": [2, 1].
+    std::vector<int> yolo_obb_label_map = {2, 1};
+    const std::string &active_yolo_model() const {
+        return yolo_net == YoloNet_OBB ? yolo_obb_model : yolo_model;
+    }
     DetectMode detect_mode = Detect_OFF;
     int idx2d = 0;
     int idx3d = 0;

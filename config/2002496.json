@@ -12,5 +12,11 @@
     "color_temp": "CT_3000K",
     "gpu_direct": false,
     "color": true,
-    "yolo": "/home/ratan/yolo_model/obb.engine"
+    "yolo": "/home/ratan/yolo_model/obb.engine",
+    "yolo_obb": "/home/ratan/yolo_model/small_cyl_obb.engine",
+    "yolo_net": "detect",
+    "yolo_obb_label_map": [
+        2,
+        1
+    ]
 }

@@ -108,10 +108,12 @@ COpenGLDisplay::COpenGLDisplay(const char *name, CameraParams *camera_params,
     }
     
     if (camera_select->detect_mode == Detect2D_GLThread &&
-        camera_select->yolo_model.empty()) {
+        camera_select->active_yolo_model().empty()) {
         std::cerr << "COpenGLDisplay: Detect2D_GLThread selected but YOLO model "
-                     "path is empty for camera "
-                  << camera_params->camera_serial << std::endl;
+                     "path ("
+                  << YoloNetNames[camera_select->yolo_net]
+                  << ") is empty for camera " << camera_params->camera_serial
+                  << std::endl;
     }
 
     if (camera_select->enable_obb &&
@@ -197,9 +199,10 @@ void COpenGLDisplay::ThreadRunning() {
     const bool yolo_glthread_enabled =
         (camera_select->detect_mode == Detect2D_GLThread);
     if (yolo_glthread_enabled) {
-        printf("YOLO initialization...\n");
-
-        const std::string engine_file_path = camera_select->yolo_model;
+        // The user picks the network in the GUI dropdown / config "yolo_net".
+        const std::string engine_file_path = camera_select->active_yolo_model();
+        printf("YOLO initialization... net=%s engine=%s\n",
+               YoloNetNames[camera_select->yolo_net], engine_file_path.c_str());
         yolov8 = new YOLOv8(engine_file_path, camera_params->width,
                             camera_params->height, 0, d_convert, npp_ctx);
         yolov8->make_pipe(false);
@@ -316,10 +319,19 @@ void COpenGLDisplay::ThreadRunning() {
                     }
                 }
 
-                // Match yolo_offline input layout (OpenCV frames are BGR).
-                rgba2bgr_convert(d_convert, debayer.d_debayer,
-                                 camera_params->width, camera_params->height,
-                                 0);
+                // Channel order is part of the network choice:
+                //   Detect (old): BGR, as it has always been deployed.
+                //   OBB (new):    RGB -- Ultralytics trains/exports on RGB and
+                //                 feeding BGR halves recall on these sepia frames.
+                if (camera_select->yolo_net == YoloNet_OBB) {
+                    rgba2rgb_convert(d_convert, debayer.d_debayer,
+                                     camera_params->width, camera_params->height,
+                                     0);
+                } else {
+                    rgba2bgr_convert(d_convert, debayer.d_debayer,
+                                     camera_params->width, camera_params->height,
+                                     0);
+                }
 
                 if (yolov8->graph_captured) {
                     // nvtxRangePush("graph");
@@ -332,6 +344,22 @@ void COpenGLDisplay::ThreadRunning() {
                 }
 
                 yolov8->postprocess(objs);
+
+                // OBB net: its class ids follow its own dataset (0=vert_cyl,
+                // 1=side_cyl); remap to the cbot labels (0=Mouse, 1=SideCyl,
+                // 2=VertCyl) via yolo_obb_label_map. Unmapped ids are dropped.
+                if (camera_select->yolo_net == YoloNet_OBB) {
+                    const auto &map = camera_select->yolo_obb_label_map;
+                    std::vector<Bbox> mapped;
+                    mapped.reserve(objs.size());
+                    for (auto &b : objs) {
+                        if (b.label >= 0 && b.label < (int)map.size()) {
+                            b.label = map[b.label];
+                            mapped.push_back(b);
+                        }
+                    }
+                    objs.swap(mapped);
+                }
 
                 // Reject false positives (reflections, off-arena, low score):
                 //   1) confidence gate, 2) arena ROI, 3) box brightness.
@@ -534,16 +562,28 @@ void COpenGLDisplay::ThreadRunning() {
             // is disabled). Done after the OBB block so these overlay lines are
             // not present in the frame the OBB CV refinement reads.
             for (const auto &b : plain_objs) {
-                const auto &r = b.rect;
-                float corners[8] = {
-                    r.x,           r.y,
-                    r.x + r.width, r.y,
-                    r.x + r.width, r.y + r.height,
-                    r.x,           r.y + r.height};
+                float corners[8];
+                if (b.has_obb) {
+                    // Native OBB net: draw the rotated box itself.
+                    bbox_obb_corners(b, corners);
+                } else {
+                    const auto &r = b.rect;
+                    const float aa[8] = {
+                        r.x,           r.y,
+                        r.x + r.width, r.y,
+                        r.x + r.width, r.y + r.height,
+                        r.x,           r.y + r.height};
+                    std::copy(aa, aa + 8, corners);
+                }
                 CHECK(cudaMemcpyAsync(d_box_points, corners, sizeof(float) * 8,
                                       cudaMemcpyHostToDevice, 0));
-                gpu_draw_box(debayer.d_debayer, camera_params->width,
-                             camera_params->height, d_box_points, b.label, 0);
+                if (b.has_obb) {
+                    gpu_draw_obb(debayer.d_debayer, camera_params->width,
+                                 camera_params->height, d_box_points, b.label, 0);
+                } else {
+                    gpu_draw_box(debayer.d_debayer, camera_params->width,
+                                 camera_params->height, d_box_points, b.label, 0);
+                }
             }
 
             // Send all detected objects to cbot as a flexible list. Each entry
@@ -555,7 +595,16 @@ void COpenGLDisplay::ThreadRunning() {
                 fb->Clear();
                 std::vector<::flatbuffers::Offset<Obj::obb>> fb_objs;
                 // Mouse / VertCyl (and SideCyl when OBB off): axis-aligned.
+                // With the native OBB net every box carries its own center,
+                // long/short size and long-axis angle (degrees, [0,180),
+                // image coords x right / y down).
                 for (const auto &b : plain_objs) {
+                    if (b.has_obb) {
+                        fb_objs.push_back(Obj::Createobb(*fb, b.cx, b.cy, b.rw,
+                                                         b.rh, b.theta_deg,
+                                                         (float)b.label));
+                        continue;
+                    }
                     float cx = b.rect.x + b.rect.width * 0.5f;
                     float cy = b.rect.y + b.rect.height * 0.5f;
                     fb_objs.push_back(Obj::Createobb(*fb, cx, cy, b.rect.width,

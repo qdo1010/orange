@@ -30,6 +30,7 @@ static bool g_stream_mode = false;
 struct RemoteCamInfo {
     std::string serial;
     int focus;
+    int focus_max; // lens-dependent step range (e.g. EF 50/1.8 STM: 4256)
     int iris;
     bool selected;
 };
@@ -113,6 +114,9 @@ int main(int argc, char **args) {
         network_config_folders.push_back(entry.path().string());
     }
     int network_config_select = 0;
+    // Config folder actually broadcast at the last "Open Cameras" press —
+    // changing the radio afterwards has no effect until cameras are reopened.
+    std::string opened_config_folder;
 
     std::vector<std::string> local_config_folders;
     std::string local_start_folder_name = orange_root_dir_str + "/config/local";
@@ -239,8 +243,27 @@ int main(int argc, char **args) {
                     ImGui::PopStyleColor();
                 }
 
-                if (i != network_config_folders.size() - 1)
+                if ((i + 1) % 5 != 0 &&
+                    i != network_config_folders.size() - 1)
                     ImGui::SameLine();
+            }
+            ImGui::TextColored(
+                ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Selected config: %s",
+                string_split(network_config_folders[network_config_select], "/")
+                    .back()
+                    .c_str());
+            if (camera_control->open && !opened_config_folder.empty() &&
+                opened_config_folder !=
+                    network_config_folders[network_config_select]) {
+                ImGui::TextColored(
+                    ImVec4(1.0f, 0.6f, 0.0f, 1.0f),
+                    "WARNING: cameras are OPEN with config '%s' — selecting "
+                    "'%s' has no effect until cameras are closed and reopened",
+                    string_split(opened_config_folder, "/").back().c_str(),
+                    string_split(network_config_folders[network_config_select],
+                                 "/")
+                        .back()
+                        .c_str());
             }
 
             if (cam_count == 0) {
@@ -257,6 +280,11 @@ int main(int argc, char **args) {
                 ImGui::PushStyleColor(ImGuiCol_Button,
                                       ImVec4{0, 0.5f, 0, 1.0f});
                 if (ImGui::Button("Open Cameras")) {
+                    opened_config_folder =
+                        network_config_folders[network_config_select];
+                    printf("Open Cameras: config folder = %s\n",
+                           opened_config_folder.c_str());
+                    fflush(stdout);
                     update_camera_configs(
                         camera_config_files,
                         network_config_folders[network_config_select]);
@@ -270,6 +298,7 @@ int main(int argc, char **args) {
                         RemoteCamInfo rc;
                         rc.serial = j.value("name", "");
                         rc.focus = j.value("focus", 300);
+                        rc.focus_max = j.value("focus_max", 500);
                         rc.iris = j.value("iris", 0);
                         rc.selected = false;
                         if (!rc.serial.empty())
@@ -517,7 +546,7 @@ int main(int argc, char **args) {
                     char slbl[64];
                     snprintf(slbl, sizeof(slbl), "Focus %s",
                              rc.serial.c_str());
-                    ImGui::SliderInt(slbl, &rc.focus, 0, 500);
+                    ImGui::SliderInt(slbl, &rc.focus, 0, rc.focus_max);
                     ImGui::SameLine();
                     static bool waiting_preview = false;
                     if (ImGui::Button("Set Focus & Preview")) {
@@ -914,11 +943,12 @@ int main(int argc, char **args) {
                         int current_index =
                             static_cast<int>(cameras_select[i].detect_mode);
                         sprintf(temp_string, "##detection_mode%d", i);
+                        ImGui::SetNextItemWidth(110);
                         if (ImGui::Combo(temp_string, &current_index,
                                          DetectModeNames,
                                          IM_ARRAYSIZE(DetectModeNames))) {
                             if (current_index != 0 &&
-                                cameras_select[i].yolo_model.empty()) {
+                                cameras_select[i].active_yolo_model().empty()) {
                                 current_index = 0;
                                 error_message = "Speciy YOLO model first in "
                                                 "Camera Property.";
@@ -926,6 +956,31 @@ int main(int argc, char **args) {
                             }
                             cameras_select[i].detect_mode =
                                 static_cast<DetectMode>(current_index);
+                        }
+                        // Network dropdown: old detect engine vs new OBB engine.
+                        ImGui::SameLine();
+                        int net_index =
+                            static_cast<int>(cameras_select[i].yolo_net);
+                        sprintf(temp_string, "##yolo_net%d", i);
+                        ImGui::SetNextItemWidth(110);
+                        if (ImGui::Combo(temp_string, &net_index, YoloNetNames,
+                                         IM_ARRAYSIZE(YoloNetNames))) {
+                            const YoloNet chosen = static_cast<YoloNet>(net_index);
+                            const std::string &path =
+                                chosen == YoloNet_OBB
+                                    ? cameras_select[i].yolo_obb_model
+                                    : cameras_select[i].yolo_model;
+                            if (path.empty()) {
+                                error_message =
+                                    chosen == YoloNet_OBB
+                                        ? "No OBB engine set: fill 'YOLO OBB' in "
+                                          "Camera Property (config \"yolo_obb\")."
+                                        : "No detect engine set: fill 'YOLO' in "
+                                          "Camera Property (config \"yolo\").";
+                                show_error = true;
+                            } else {
+                                cameras_select[i].yolo_net = chosen;
+                            }
                         }
                     }
                     ImGui::EndTable();

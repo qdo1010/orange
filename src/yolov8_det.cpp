@@ -146,10 +146,13 @@ YOLOv8::YOLOv8(const std::string &engine_file_path, int width, int height,
                   << " shape=" << dims_ss.str()
                   << " dtype=" << dtype_to_cstr(dtype) << std::endl;
     }
-    if (this->num_outputs < 4 && this->num_outputs != 2) {
-        std::cerr << "YOLOv8 warning: this pipeline expects >=4 outputs "
-                     "(num_dets/boxes/scores/labels) or 2 outputs (seg). Loaded engine has "
-                  << this->num_outputs << " outputs." << std::endl;
+    // Supported layouts: 1 output [1,N,6|7|38] (Ultralytics packed / OBB),
+    // 2 outputs (seg: packed + mask protos), >=4 named outputs (EfficientNMS).
+    if (this->num_outputs != 1 && this->num_outputs != 2 && this->num_outputs < 4) {
+        std::cerr << "YOLOv8 warning: unexpected number of outputs ("
+                  << this->num_outputs
+                  << "); expected 1 (packed detect/OBB), 2 (seg) or >=4 "
+                     "(num_dets/boxes/scores/labels)." << std::endl;
     }
 
     // Detect seg mask prototype output: look for a 4D output [1, 32, H, W]
@@ -506,17 +509,19 @@ void YOLOv8::postprocess(std::vector<Bbox> &objs) {
         return;
     }
 
-    // Support single/two-output engines with shape [1, N, 6] (detect)
-    // or [1, N, 38] (seg: 6 detect + 32 mask coefficients).
+    // Support single/two-output engines with shape [1, N, 6] (detect),
+    // [1, N, 38] (seg: 6 detect + 32 mask coefficients) or
+    // [1, N, 7] (YOLO-OBB: cx, cy, w, h, conf, cls, angle_rad -- both the
+    // Ultralytics nms=True export and the end-to-end YOLO26 export).
     // Find the detection output (not the mask prototype output).
     int det_out_idx = -1;
     for (int i = 0; i < (int)this->output_bindings.size(); i++) {
         if (i == mask_proto_idx) continue;  // skip prototype tensor
         const auto &dims = this->output_bindings[i].dims;
-        // Match [1, N, 6] or [1, N, 38]
+        // Match [1, N, 6], [1, N, 38] or [1, N, 7]
         if (dims.nbDims >= 2) {
             int last = dims.d[dims.nbDims - 1];
-            if (last == 6 || last == 38) {
+            if (last == 6 || last == 38 || last == 7) {
                 det_out_idx = i;
                 break;
             }
@@ -527,8 +532,9 @@ void YOLOv8::postprocess(std::vector<Bbox> &objs) {
         const void *out_ptr = this->host_ptrs[det_out_idx];
         const auto out_type = this->output_bindings[det_out_idx].dtype;
         const auto &dims = this->output_bindings[det_out_idx].dims;
-        const int stride = dims.d[dims.nbDims - 1];  // 6 or 38
-        const int num_mask_coeffs = stride - 6;       // 0 or 32
+        const int stride = dims.d[dims.nbDims - 1];  // 6, 7 or 38
+        const bool is_obb = (stride == 7);
+        const int num_mask_coeffs = is_obb ? 0 : stride - 6;  // 0 or 32
 
         int n = dims.d[dims.nbDims - 2];
         if (n <= 0) return;
@@ -541,6 +547,57 @@ void YOLOv8::postprocess(std::vector<Bbox> &objs) {
 
         constexpr float kConfThreshold = 0.15f;   // lowered per request
         for (int i = 0; i < n; i++) {
+            if (is_obb) {
+                // Rotated box in letterboxed input px; angle is radians with
+                // the same image-coordinate convention as Bbox::theta_deg.
+                const float cx_raw = read_as_float(out_ptr, out_type, i * stride + 0);
+                const float cy_raw = read_as_float(out_ptr, out_type, i * stride + 1);
+                const float w_raw  = read_as_float(out_ptr, out_type, i * stride + 2);
+                const float h_raw  = read_as_float(out_ptr, out_type, i * stride + 3);
+                const float score  = read_as_float(out_ptr, out_type, i * stride + 4);
+                const int label = static_cast<int>(
+                    std::round(read_as_float(out_ptr, out_type, i * stride + 5)));
+                float angle = read_as_float(out_ptr, out_type, i * stride + 6);
+
+                if (score < kConfThreshold) continue;  // also skips zero padding
+
+                float w = w_raw * ratio;
+                float h = h_raw * ratio;
+                if (!(w > 0.f) || !(h > 0.f)) continue;
+                if (w < h) {  // long axis first
+                    std::swap(w, h);
+                    angle += (float)M_PI / 2.f;
+                }
+                float deg = std::fmod(angle * 180.f / (float)M_PI, 180.f);
+                if (deg < 0.f) deg += 180.f;
+
+                Bbox obj;
+                obj.has_obb = true;
+                obj.cx = (cx_raw - dw) * ratio;
+                obj.cy = (cy_raw - dh) * ratio;
+                obj.rw = w;
+                obj.rh = h;
+                obj.theta_deg = deg;
+                obj.prob = score;
+                obj.label = label;
+                if (obj.cx < 0.f || obj.cx > width || obj.cy < 0.f || obj.cy > height)
+                    continue;
+
+                float c[8];
+                bbox_obb_corners(obj, c);
+                float x0 = c[0], y0 = c[1], x1 = c[0], y1 = c[1];
+                for (int k = 1; k < 4; k++) {
+                    x0 = std::min(x0, c[2 * k]);     x1 = std::max(x1, c[2 * k]);
+                    y0 = std::min(y0, c[2 * k + 1]); y1 = std::max(y1, c[2 * k + 1]);
+                }
+                x0 = clamp(x0, 0.f, width);  x1 = clamp(x1, 0.f, width);
+                y0 = clamp(y0, 0.f, height); y1 = clamp(y1, 0.f, height);
+                if (x1 <= x0 || y1 <= y0) continue;
+                obj.rect = cv::Rect_<float>(x0, y0, x1 - x0, y1 - y0);
+                objs.push_back(obj);
+                continue;
+            }
+
             const float x0_raw = read_as_float(out_ptr, out_type, i * stride + 0);
             const float y0_raw = read_as_float(out_ptr, out_type, i * stride + 1);
             const float x1_raw = read_as_float(out_ptr, out_type, i * stride + 2);

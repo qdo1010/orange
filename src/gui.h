@@ -267,7 +267,23 @@ inline void set_camera_properties(CameraEmergent *ecams,
         HelpMarker("Set keyframe interval as a multiple of the framerate. "
                    "Default is set to 1 second.");
 
-        input_text("YOLO", cameras_select->yolo_model);
+        // Two engines per camera; the "YOLO net" dropdown picks which one
+        // Detect2D_GLThread loads (takes effect the next time detection starts).
+        input_text("YOLO", cameras_select[selected_camera].yolo_model);
+        input_text("YOLO OBB", cameras_select[selected_camera].yolo_obb_model);
+        {
+            int net_idx = static_cast<int>(cameras_select[selected_camera].yolo_net);
+            if (ImGui::Combo("YOLO net", &net_idx, YoloNetNames,
+                             IM_ARRAYSIZE(YoloNetNames))) {
+                cameras_select[selected_camera].yolo_net =
+                    static_cast<YoloNet>(net_idx);
+            }
+            ImGui::SameLine();
+            HelpMarker("Detect (old): axis-aligned model from the 'YOLO' path "
+                       "(config key \"yolo\").\nOBB (new): native oriented-box "
+                       "model from the 'YOLO OBB' path (config key "
+                       "\"yolo_obb\"). The angle is sent to cbot.");
+        }
         ImGui::Checkbox("GPU Direct",
                         &cameras_params[selected_camera].gpu_direct);
         ImGui::Checkbox("Color", &cameras_params[selected_camera].color);
