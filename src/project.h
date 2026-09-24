@@ -46,6 +46,9 @@ void init_7MP_camera_params_mono(CameraParams *camera_params, int camera_id,
                                  int num_cameras, int gain, int exposure,
                                  int gpu_id, int frame_rate);
 bool make_folder(std::string folder_name);
+// When running under sudo, chowns path (recursively) to the invoking user so
+// recordings are not left root-owned. No-op otherwise.
+void give_to_sudo_user(const std::string &path);
 void update_camera_configs(std::vector<std::string> &camera_config_files,
                            std::string input_folder);
 void select_cameras_have_configs(std::vector<std::string> &camera_config_files,

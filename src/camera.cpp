@@ -1,4 +1,5 @@
 #include "camera.h"
+#include "usb_camera.h"
 #include <algorithm>
 #include <iostream>
 #include <numeric>
@@ -185,6 +186,8 @@ void configure_factory_defaults(Emergent::CEmergentCamera *camera,
 
 void get_senstemp_range(Emergent::CEmergentCamera *camera,
                         CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     EVT_CameraGetInt32ParamMax(camera, "SensTemp",
                                &camera_params->sens_temp_max);
     EVT_CameraGetInt32ParamMin(camera, "SensTemp",
@@ -193,6 +196,8 @@ void get_senstemp_range(Emergent::CEmergentCamera *camera,
 
 void get_senstemp_value(Emergent::CEmergentCamera *camera,
                         CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     int return_value =
         EVT_CameraGetInt32Param(camera, "SensTemp", &camera_params->sens_temp);
     if (return_value != 0) {
@@ -202,6 +207,8 @@ void get_senstemp_value(Emergent::CEmergentCamera *camera,
 
 void update_gain_value(Emergent::CEmergentCamera *camera, int gain_val,
                        CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     EVT_CameraGetUInt32ParamMax(camera, "Gain", &camera_params->gain_max);
     EVT_CameraGetUInt32ParamMin(camera, "Gain", &camera_params->gain_min);
     EVT_CameraGetUInt32ParamInc(camera, "Gain", &camera_params->gain_inc);
@@ -215,6 +222,8 @@ void update_gain_value(Emergent::CEmergentCamera *camera, int gain_val,
 void update_color_temperature(Emergent::CEmergentCamera *camera,
                               std::string color_string,
                               CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     const char *color_temp = color_string.c_str();
     check_camera_errors(EVT_CameraSetEnumParam(camera, "ColorTemp", color_temp),
                         camera_params->camera_serial.c_str());
@@ -223,6 +232,8 @@ void update_color_temperature(Emergent::CEmergentCamera *camera,
 
 void update_focus_value(Emergent::CEmergentCamera *camera, int focus_value,
                         CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     EVT_CameraGetUInt32ParamMax(camera, "Focus", &camera_params->focus_max);
     EVT_CameraGetUInt32ParamMin(camera, "Focus", &camera_params->focus_min);
     EVT_CameraGetUInt32ParamInc(camera, "Focus", &camera_params->focus_inc);
@@ -235,6 +246,8 @@ void update_focus_value(Emergent::CEmergentCamera *camera, int focus_value,
 
 void update_iris_value(Emergent::CEmergentCamera *camera, int iris_value,
                        CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     EVT_CameraGetUInt32ParamMax(camera, "Iris", &camera_params->iris_max);
     EVT_CameraGetUInt32ParamMin(camera, "Iris", &camera_params->iris_min);
     EVT_CameraGetUInt32ParamInc(camera, "Iris", &camera_params->iris_inc);
@@ -247,6 +260,8 @@ void update_iris_value(Emergent::CEmergentCamera *camera, int iris_value,
 
 void update_width_value(Emergent::CEmergentCamera *camera, int width_val,
                         CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     EVT_CameraGetUInt32ParamMax(camera, "Width", &camera_params->width_max);
     EVT_CameraGetUInt32ParamMin(camera, "Width", &camera_params->width_min);
     EVT_CameraGetUInt32ParamInc(camera, "Width", &camera_params->width_inc);
@@ -259,6 +274,8 @@ void update_width_value(Emergent::CEmergentCamera *camera, int width_val,
 
 void update_height_value(Emergent::CEmergentCamera *camera, int height_val,
                          CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     EVT_CameraGetUInt32ParamMax(camera, "Height", &camera_params->height_max);
     EVT_CameraGetUInt32ParamMin(camera, "Height", &camera_params->height_min);
     EVT_CameraGetUInt32ParamInc(camera, "Height", &camera_params->height_inc);
@@ -271,6 +288,8 @@ void update_height_value(Emergent::CEmergentCamera *camera, int height_val,
 
 void update_exposure_value(Emergent::CEmergentCamera *camera, int exposure_val,
                            CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     EVT_CameraGetUInt32ParamMax(camera, "Exposure",
                                 &camera_params->exposure_max);
     EVT_CameraGetUInt32ParamMin(camera, "Exposure",
@@ -288,6 +307,8 @@ void update_exposure_value(Emergent::CEmergentCamera *camera, int exposure_val,
 void update_exposure_framerate_value(Emergent::CEmergentCamera *camera,
                                      int exposure_val, int *frame_rate_val,
                                      CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     EVT_CameraGetUInt32ParamMax(camera, "Exposure",
                                 &camera_params->exposure_max);
     EVT_CameraGetUInt32ParamMin(camera, "Exposure",
@@ -321,6 +342,8 @@ void update_exposure_framerate_value(Emergent::CEmergentCamera *camera,
 
 void update_frame_rate_value(Emergent::CEmergentCamera *camera,
                              int frame_rate_val, CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     EVT_CameraGetUInt32ParamMax(camera, "FrameRate",
                                 &camera_params->frame_rate_max);
     EVT_CameraGetUInt32ParamMin(camera, "FrameRate",
@@ -336,6 +359,8 @@ void update_frame_rate_value(Emergent::CEmergentCamera *camera,
 
 void update_offsetX_value(Emergent::CEmergentCamera *camera, int OFFSET_X_VAL,
                           CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     // Set ROI OffsetX. Now that Width changed we need to check new OffsetX
     // limits
     EVT_CameraGetUInt32ParamMax(camera, "OffsetX", &camera_params->offsetx_max);
@@ -355,6 +380,8 @@ void update_offsetX_value(Emergent::CEmergentCamera *camera, int OFFSET_X_VAL,
 
 void update_offsetY_value(Emergent::CEmergentCamera *camera, int OFFSET_Y_VAL,
                           CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     // Set ROI OffsetX. Now that Width changed we need to check new OffsetX
     // limits
     EVT_CameraGetUInt32ParamMax(camera, "OffsetY", &camera_params->offsety_max);
@@ -375,6 +402,8 @@ void update_offsetY_value(Emergent::CEmergentCamera *camera, int OFFSET_Y_VAL,
 void open_camera_with_params(Emergent::CEmergentCamera *camera,
                              GigEVisionDeviceInfo *device_info,
                              CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     // TODO: open camera using xml file after explored on camera settings
     // EVT_CameraOpen(&camera, &deviceInfo[camera_index], XML_FILE);
 
@@ -450,6 +479,8 @@ void open_camera_with_params(Emergent::CEmergentCamera *camera,
 void update_camera_params(Emergent::CEmergentCamera *camera,
                           GigEVisionDeviceInfo *device_info,
                           CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     camera_params->gpu_direct = false;
     camera_params->gpu_id = 0;
     check_camera_errors(EVT_CameraOpen(camera, device_info),
@@ -562,6 +593,8 @@ void update_camera_params(Emergent::CEmergentCamera *camera,
 
 void camera_trigger_mode(Emergent::CEmergentCamera *camera,
                          CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     check_camera_errors(
         EVT_CameraSetEnumParam(camera, "AcquisitionMode", "MultiFrame"),
         camera_params->camera_serial.c_str());
@@ -580,6 +613,8 @@ void camera_trigger_mode(Emergent::CEmergentCamera *camera,
 // then issues TriggerSoftware to grab one frame.
 void camera_setup_lj_trigger(Emergent::CEmergentCamera *camera,
                              CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     check_camera_errors(
         EVT_CameraSetEnumParam(camera, "AcquisitionMode", "Continuous"),
         camera_params->camera_serial.c_str());
@@ -597,6 +632,8 @@ void camera_setup_lj_trigger(Emergent::CEmergentCamera *camera,
 // **********************************************sync*****************************************************
 void ptp_camera_sync(Emergent::CEmergentCamera *camera,
                      CameraParams *camera_params, int frames_per_edge) {
+    if (camera_params->is_usb)
+        return;
     // ptp triggering configuration settings.
     // frames_per_edge controls the burst length per software trigger:
     //   1 → one IR frame per LJ edge (strict 1:1 microscope sync)
@@ -620,6 +657,8 @@ void ptp_camera_sync(Emergent::CEmergentCamera *camera,
 
 void ptp_sync_off(Emergent::CEmergentCamera *camera,
                   CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     check_camera_errors(Emergent::EVT_CameraSetEnumParam(
                             camera, "AcquisitionMode", "Continuous"),
                         camera_params->camera_serial.c_str());
@@ -690,6 +729,10 @@ void test_gpo_manual_toggle(Emergent::CEmergentCamera *camera) {
 
 void close_camera(Emergent::CEmergentCamera *camera,
                   CameraParams *camera_params) {
+    if (camera_params->is_usb) {
+        usb_camera_release(camera_params->usb_device);
+        return;
+    }
     check_camera_errors(EVT_CameraClose(camera),
                         camera_params->camera_serial.c_str());
     printf("\nClose Camera: \t\tCamera Closed\n");
@@ -726,6 +769,8 @@ void set_frame_buffer(Emergent::CEmergentFrame *evt_frame,
 
 void camera_open_stream(Emergent::CEmergentCamera *camera,
                         CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     check_camera_errors(EVT_CameraOpenStream(camera),
                         camera_params->camera_serial.c_str());
 }
@@ -733,6 +778,8 @@ void camera_open_stream(Emergent::CEmergentCamera *camera,
 void allocate_frame_buffer(Emergent::CEmergentCamera *camera,
                            Emergent::CEmergentFrame *evt_frame,
                            CameraParams *camera_params, int buffer_size) {
+    if (camera_params->is_usb)
+        return;
     for (int frame_count = 0; frame_count < buffer_size; frame_count++) {
         set_frame_buffer(&evt_frame[frame_count], camera_params);
         check_camera_errors(EVT_AllocateFrameBuffer(camera,
@@ -748,6 +795,8 @@ void allocate_frame_buffer(Emergent::CEmergentCamera *camera,
 void allocate_frame_reorder_buffer(Emergent::CEmergentCamera *camera,
                                    Emergent::CEmergentFrame *frame_reorder,
                                    CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     set_frame_buffer(frame_reorder, camera_params);
     frame_reorder->convertColor = EVT_COLOR_CONVERT_NONE;
     frame_reorder->convertBitDepth = EVT_CONVERT_NONE;
@@ -759,6 +808,8 @@ void allocate_frame_reorder_buffer(Emergent::CEmergentCamera *camera,
 void destroy_frame_buffer(Emergent::CEmergentCamera *camera,
                           Emergent::CEmergentFrame *evt_frame, int buffer_size,
                           CameraParams *camera_params) {
+    if (camera_params->is_usb)
+        return;
     for (int frame_count = 0; frame_count < buffer_size; frame_count++) {
         check_camera_errors(
             EVT_ReleaseFrameBuffer(camera, &evt_frame[frame_count]),

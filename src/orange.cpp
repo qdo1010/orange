@@ -63,6 +63,8 @@ int main(int argc, char **args) {
     int cam_count = scan_cameras(max_cameras, unsorted_device_info);
     GigEVisionDeviceInfo device_info[max_cameras];
     sort_cameras_ip(unsorted_device_info, device_info, cam_count);
+    cam_count += scan_usb_cameras(device_info + cam_count,
+                                  max_cameras - cam_count);
 
     std::filesystem::path cwd = std::filesystem::current_path();
     std::string delimiter = "/";
@@ -394,6 +396,8 @@ int main(int argc, char **args) {
 
                         for (int i = 0; i < num_cameras; i++) {
                             cameras_select[i].stream_on = false;
+                            if (cameras_params[i].is_usb) // not in the name list below
+                                cameras_select[i].stream_on = true;
                             if (cameras_params[i].camera_name == "Cam16") {
                                 cameras_select[i].stream_on = true;
                                 cameras_select[i].detect_mode =
@@ -507,7 +511,7 @@ int main(int argc, char **args) {
                     ImGui::SameLine();
                     if (ImGui::Button("Start Recording")) {
                         unsigned long long ptp_time =
-                            get_current_PTP_time(&ecams[0].camera);
+                            reference_ptp_time(ecams, cameras_params, num_cameras);
                         int delay_in_second = 3;
                         ptp_params->ptp_global_time =
                             ((unsigned long long)delay_in_second) * 1000000000 +
@@ -531,7 +535,7 @@ int main(int argc, char **args) {
                                           ImVec4{0, 0.3f, 0.6f, 1.0f});
                     if (ImGui::Button("Start Stream (no save)")) {
                         unsigned long long ptp_time =
-                            get_current_PTP_time(&ecams[0].camera);
+                            reference_ptp_time(ecams, cameras_params, num_cameras);
                         int delay_in_second = 3;
                         ptp_params->ptp_global_time =
                             ((unsigned long long)delay_in_second) * 1000000000 +
@@ -557,7 +561,7 @@ int main(int argc, char **args) {
                 if (ImGui::Button("Stop Recording")) {
                     std::cout << "DEBUG SERVER: 'Stop Recording' button pressed by user" << std::endl;
                     unsigned long long ptp_time =
-                        get_current_PTP_time(&ecams[0].camera);
+                        reference_ptp_time(ecams, cameras_params, num_cameras);
                     int delay_in_second = 3;
                     ptp_params->ptp_stop_time =
                         ((unsigned long long)delay_in_second) * 1000000000 +
@@ -709,6 +713,8 @@ int main(int argc, char **args) {
                 camera_threads.pop_back();
             }
             for (int i = 0; i < num_cameras; i++) {
+                if (cameras_params[i].is_usb)
+                    continue;
                 destroy_frame_buffer(&ecams[i].camera, ecams[i].evt_frame,
                                      evt_buffer_size, &cameras_params[i]);
                 delete[] ecams[i].evt_frame;
@@ -721,6 +727,7 @@ int main(int argc, char **args) {
             }
             camera_control->sync_camera = false;
             camera_control->record_video = false;
+            give_to_sudo_user(encoder_config->folder_name);
 
             ptp_params->ptp_global_time = 0;
             ptp_params->ptp_stop_time = 0;
@@ -1249,6 +1256,8 @@ int main(int argc, char **args) {
 
                         for (int i = 0; i < num_cameras; i++) {
                             cameras_select[i].stream_on = false;
+                            if (cameras_params[i].is_usb) // not in the name list below
+                                cameras_select[i].stream_on = true;
                             if (cameras_params[i].camera_name ==
                                 "ceiling_center") {
                                 cameras_select[i].stream_on = true;
@@ -1462,6 +1471,7 @@ int main(int argc, char **args) {
                         delete[] tex_gl;
                         tex_gl = nullptr;
                         camera_control->record_video = false;
+                        give_to_sudo_user(encoder_config->folder_name);
                     }
                 }
             }

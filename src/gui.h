@@ -7,6 +7,7 @@
 #include "gx_helper.h"
 #include "imgui.h"
 #include "realtime_tool.h"
+#include "usb_camera.h"
 #include "video_capture.h"
 #include <math.h>
 #include <thread>
@@ -127,7 +128,13 @@ inline void start_camera_streaming(
                                          cameras_select, num_cameras);
     }
 
+    int num_usb = count_usb_cameras(cameras_params, num_cameras);
+    ptp_params->num_usb_cameras = num_usb;
+    ptp_params->ptp_start_reached = false;
+
     for (int i = 0; i < num_cameras; i++) {
+        if (cameras_params[i].is_usb)
+            continue;
         camera_open_stream(&ecams[i].camera, &cameras_params[i]);
         ecams[i].evt_frame = new Emergent::CEmergentFrame[evt_buffer_size];
         allocate_frame_buffer(&ecams[i].camera, ecams[i].evt_frame,
@@ -144,7 +151,10 @@ inline void start_camera_streaming(
             ptp_camera_sync(&ecams[i].camera, &cameras_params[i],
                             camera_control->lj_frames_per_edge);
         }
-        camera_control->sync_camera = true;
+        // USB cameras wait for the Emergent cameras' PTP gate instead.
+        if (num_usb < num_cameras)
+            camera_control->sync_camera = true;
+        ptp_params->ptp_counter += num_usb; // threads not started yet
     }
 
     if (camera_control->trigger_mode) {
@@ -158,9 +168,10 @@ inline void start_camera_streaming(
 
     for (int i = 0; i < num_cameras; i++) {
         camera_threads.emplace_back(
-            &acquire_frames, &ecams[i], &cameras_params[i], &cameras_select[i],
-            camera_control, tex[i].cuda_buffer, encoder_setup, folder_name,
-            ptp_params, indigo_signal_builder);
+            cameras_params[i].is_usb ? &acquire_frames_usb : &acquire_frames,
+            &ecams[i], &cameras_params[i], &cameras_select[i], camera_control,
+            tex[i].cuda_buffer, encoder_setup, folder_name, ptp_params,
+            indigo_signal_builder);
     }
 }
 
@@ -179,16 +190,19 @@ stop_camera_streaming(std::vector<std::thread> &camera_threads,
     }
 
     for (int i = 0; i < num_cameras; i++) {
+        if (cameras_params[i].is_usb)
+            continue;
         destroy_frame_buffer(&ecams[i].camera, ecams[i].evt_frame,
-                             evt_buffer_size, cameras_params);
+                             evt_buffer_size, &cameras_params[i]);
         delete[] ecams[i].evt_frame;
+        ecams[i].evt_frame = nullptr;
         check_camera_errors(EVT_CameraCloseStream(&ecams[i].camera),
                             cameras_params[i].camera_serial.c_str());
     }
 
     if (num_cameras > 1) {
         for (int i = 0; i < num_cameras; i++) {
-            ptp_sync_off(&ecams[i].camera, cameras_params);
+            ptp_sync_off(&ecams[i].camera, &cameras_params[i]);
         }
         ptp_params->ptp_counter = 0;
         ptp_params->ptp_global_time = 0;
@@ -264,6 +278,18 @@ inline void set_camera_properties(CameraEmergent *ecams,
             slider_frame_rate = cameras_params[selected_camera].frame_rate;
             OffsetX = cameras_params[selected_camera].offsetx;
             OffsetY = cameras_params[selected_camera].offsety;
+        }
+
+        if (cameras_params[selected_camera].is_usb) {
+            ImGui::Text("USB camera %s: %ux%u @ %u fps",
+                        cameras_params[selected_camera].usb_device.c_str(),
+                        cameras_params[selected_camera].width,
+                        cameras_params[selected_camera].height,
+                        cameras_params[selected_camera].frame_rate);
+            ImGui::TextDisabled("Set width/height/frame_rate in the camera "
+                                "json; no live properties over V4L2.");
+            ImGui::TreePop();
+            return;
         }
 
         ImGui::SliderInt("GOP", &encoder_config->gop, 1, 10, "%d second");

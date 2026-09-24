@@ -65,6 +65,10 @@ struct CameraParams {
     int sens_temp;
     int sens_temp_max;
     int sens_temp_min;
+    // USB (V4L2) camera: Emergent calls are skipped, see usb_camera.h.
+    bool is_usb = false;
+    std::string usb_device;
+    unsigned int usb_pixfmt = 0; // V4L2 fourcc
     CameraParams() : frame_rate(60), gop(1) {}
 };
 
@@ -90,7 +94,7 @@ inline void __check_camera_errors(EVT_ERROR err, const char *camera_serial,
 
 struct CameraEmergent {
     Emergent::CEmergentCamera camera;
-    Emergent::CEmergentFrame *evt_frame;
+    Emergent::CEmergentFrame *evt_frame = nullptr;
     Emergent::CEmergentFrame frame_recv;
     Emergent::CEmergentFrame frame_reorder;
 };
@@ -105,6 +109,9 @@ struct PTPParams {
     bool ptp_stop_reached = false;
     bool network_set_stop_ptp = false;
     bool network_set_start_ptp = false;
+    // USB cameras have no PTP clock; they count as already arrived at the
+    // start barrier (ptp_counter) and join the stop barrier themselves.
+    int num_usb_cameras = 0;
 };
 
 void print_camera_device_struct(GigEVisionDeviceInfo *device_info,

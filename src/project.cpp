@@ -1,4 +1,5 @@
 #include "project.h"
+#include "usb_camera.h"
 #include "video_capture.h"
 #include <fstream>
 #include <iostream>
@@ -355,6 +356,25 @@ bool make_folder(std::string folder_name) {
     return true;
 }
 
+void give_to_sudo_user(const std::string &path) {
+    const char *uid_str = getenv("SUDO_UID");
+    const char *gid_str = getenv("SUDO_GID");
+    if (geteuid() != 0 || !uid_str || !gid_str || path.empty())
+        return;
+    uid_t uid = (uid_t)strtoul(uid_str, nullptr, 10);
+    gid_t gid = (gid_t)strtoul(gid_str, nullptr, 10);
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec))
+        return;
+    if (lchown(path.c_str(), uid, gid) != 0)
+        perror(("chown " + path).c_str());
+    for (auto &entry :
+         std::filesystem::recursive_directory_iterator(path, ec)) {
+        if (lchown(entry.path().c_str(), uid, gid) != 0)
+            perror(("chown " + entry.path().string()).c_str());
+    }
+}
+
 void update_camera_configs(std::vector<std::string> &camera_config_files,
                            std::string input_folder) {
     camera_config_files.clear();
@@ -405,6 +425,21 @@ bool set_camera_params(CameraParams *camera_params,
                      [&](const std::string &str) {
                          return str.find(sub_str) != std::string::npos;
                      });
+
+    if (is_usb_device_info(device_info)) {
+        bool from_config = it != camera_config_files.end();
+        if (from_config) {
+            auto config_idx = std::distance(camera_config_files.begin(), it);
+            std::cout << "Load camera json file: "
+                      << camera_config_files[config_idx] << std::endl;
+            load_camera_json_config_files(camera_config_files[config_idx],
+                                          camera_params, camera_select,
+                                          camera_idx, num_cameras);
+        }
+        init_usb_camera_params(camera_params, device_info, camera_idx,
+                               num_cameras, from_config);
+        return true;
+    }
 
     if (it == camera_config_files.end()) {
         if (strcmp(device_info->modelName, "HB-65000GM") == 0) {
