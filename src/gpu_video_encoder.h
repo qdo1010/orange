@@ -6,7 +6,7 @@
 #include "image_processing.h"
 #include "threadworker.h"
 
-#define ENCODER_ENTRIES_MAX 20
+#define ENCODER_ENTRIES_MAX 60 // ~0.33 s at 180 fps; keep well below the camera buffer count (100)
 
 struct Writer {
     std::string video_file;
