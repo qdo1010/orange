@@ -39,9 +39,11 @@ static std::vector<RemoteCamInfo> g_remote_cams;
 #define display_gpu_id 0
 
 int main(int argc, char **args) {
-    bool enable_lj_trigger = false;
+    bool enable_lj_connect = false;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(args[i], "--lj-trigger") == 0) enable_lj_trigger = true;
+        if (strcmp(args[i], "--lj-trigger") == 0 ||
+            strcmp(args[i], "--lj") == 0)
+            enable_lj_connect = true;
     }
 
     ck(cudaSetDevice(display_gpu_id));
@@ -86,16 +88,19 @@ int main(int argc, char **args) {
     CameraControl *camera_control =
         new CameraControl{false, false, false, false, false};
 
+    // The LabJack is a passive analog logger only: when connected, AIN2
+    // (ScanImage frame clock) + AIN0 (IR LED witness) are streamed to
+    // labjack_analog.bin between Start/Stop Recording for post-hoc
+    // alignment. It never drives camera triggering — cameras always
+    // free-run on PTP at the rig config's frame_rate.
     LabJackTrigger lj_trigger;
-    if (enable_lj_trigger) {
+    if (enable_lj_connect) {
         if (!lj_trigger.start()) {
             fprintf(stderr,
-                    "ERROR: --lj-trigger requested but LabJack failed to "
+                    "ERROR: --lj requested but LabJack failed to "
                     "start; aborting.\n");
             return 1;
         }
-        camera_control->lj_trigger_mode = true;
-        camera_control->lj_trigger = &lj_trigger;
     }
 
     int evt_buffer_size{100};
@@ -290,16 +295,16 @@ int main(int argc, char **args) {
             if (ImGui::CollapsingHeader("LabJack T7 / ScanImage sync",
                                         ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::Indent();
-                // Once cameras are open the LJ state has been latched into
-                // CameraControl + broadcast in OPENCAMERA — changing it
-                // mid-session would desync master and clients.
-                ImGui::BeginDisabled(camera_control->open);
+                // Passive logging only — the LJ never triggers cameras, so
+                // it's safe to connect at any point before Start Recording.
+                // Logging starts/stops with the recording buttons.
 
                 if (lj_trigger.running()) {
                     ImGui::PushStyleColor(
                         ImGuiCol_Text,
                         ImVec4(0.20f, 0.85f, 0.30f, 1.0f));
-                    ImGui::Text("[OK] LabJack connected");
+                    ImGui::Text("[OK] LabJack connected — passive analog "
+                                "logging (AIN2 + AIN0)");
                     ImGui::PopStyleColor();
                     ImGui::Text("    edges seen: %lu",
                                 (unsigned long)lj_trigger.edge_counter());
@@ -322,56 +327,6 @@ int main(int argc, char **args) {
                     ImGui::Text("(disconnected)");
                     ImGui::PopStyleColor();
                 }
-                ImGui::Spacing();
-
-                // IR rate dropdown — picks how many camera frames per LJ edge.
-                static int lj_mode_idx = 0;
-                static const int lj_mode_n[] = {1, 2, 4};
-                static const char *lj_mode_labels[] = {
-                    "1:1   (40 Hz IR — strict flyback sync)",
-                    "1:2   (80 Hz IR — frame 2 lands mid-scan)",
-                    "1:4   (160 Hz IR — frames 2-4 land mid-scan)"};
-                ImGui::TextDisabled("IR rate (frames per LJ edge):");
-                ImGui::SetNextItemWidth(360.0f);
-                if (ImGui::Combo("##lj_mode", &lj_mode_idx, lj_mode_labels,
-                                 IM_ARRAYSIZE(lj_mode_labels))) {
-                    camera_control->lj_frames_per_edge =
-                        lj_mode_n[lj_mode_idx];
-                }
-                // Keep the field in sync even when not toggled.
-                camera_control->lj_frames_per_edge = lj_mode_n[lj_mode_idx];
-
-                // Warn if the chosen rig folder name and the dropdown N
-                // disagree — the rig's frame_rate is baked into the JSONs and
-                // must match N or the camera will miss triggers.
-                if (network_config_select >= 0 &&
-                    network_config_select <
-                        (int)network_config_folders.size()) {
-                    const std::string &rig_path =
-                        network_config_folders[network_config_select];
-                    int rig_implied_n = -1;
-                    if (rig_path.find("_40hz") != std::string::npos)
-                        rig_implied_n = 1;
-                    else if (rig_path.find("_80hz") != std::string::npos)
-                        rig_implied_n = 2;
-                    else if (rig_path.find("_160hz") != std::string::npos)
-                        rig_implied_n = 4;
-                    if (rig_implied_n > 0 &&
-                        rig_implied_n != lj_mode_n[lj_mode_idx]) {
-                        ImGui::PushStyleColor(
-                            ImGuiCol_Text,
-                            ImVec4(1.0f, 0.55f, 0.0f, 1.0f));
-                        ImGui::TextWrapped(
-                            "WARNING: rig config implies N=%d (frame_rate "
-                            "baked in JSONs) but IR rate dropdown is N=%d. "
-                            "Camera will miss triggers — pick a matching "
-                            "rig + IR rate.",
-                            rig_implied_n, lj_mode_n[lj_mode_idx]);
-                        ImGui::PopStyleColor();
-                    }
-                }
-
-                ImGui::EndDisabled();
                 ImGui::Unindent();
             }
             ImGui::Separator();
@@ -403,14 +358,15 @@ int main(int argc, char **args) {
                     }
                     select_cameras_have_configs(camera_config_files,
                                                 device_info, check, cam_count);
-                    bool lj_active = lj_trigger.running();
-                    camera_control->lj_trigger_mode = lj_active;
-                    camera_control->lj_trigger =
-                        lj_active ? &lj_trigger : nullptr;
+                    // LJ is passive-log-only: never enable trigger mode,
+                    // locally or on clients.
+                    camera_control->lj_trigger_mode = false;
+                    camera_control->lj_trigger = nullptr;
+                    camera_control->lj_frames_per_edge = 1;
                     host_broadcast_open_cameras(
                         fb_builder, &server,
                         network_config_folders[network_config_select],
-                        lj_active, camera_control->lj_frames_per_edge);
+                        false, 1);
                     // open cameras
                     num_cameras = 0;
                     for (int i = 0; i < cam_count; i++) {
@@ -556,26 +512,17 @@ int main(int argc, char **args) {
                         ptp_params->ptp_global_time =
                             ((unsigned long long)delay_in_second) * 1000000000 +
                             ptp_time;
-                        // Pick a future edge as the shared first-frame label.
-                        // 10-edge buffer (~250 ms at 40 Hz) absorbs thread
-                        // startup jitter — small enough that recording starts
-                        // promptly, large enough that all camera threads
-                        // reach wait_for_next_edge before edge K arrives.
-                        uint64_t start_edge = 0;
+                        // Save raw AIN2/AIN0 stream alongside the recording
+                        // so the analog signal (frame clock + IR LED
+                        // witness) can be aligned to the frames post-hoc.
                         if (lj_trigger.running()) {
-                            start_edge = lj_trigger.edge_counter() + 10;
-                            camera_control->lj_start_edge = start_edge;
-                            // Save raw AIN2/AIN0 stream alongside the
-                            // recording so we can correlate the analog
-                            // signal (frame clock + IR LED witness) with
-                            // any artifacts post-hoc.
                             lj_trigger.start_logging(
                                 encoder_config->folder_name +
                                 "/labjack_analog.bin");
                         }
                         host_broadcast_set_start_ptp(
                             fb_builder, &server, ptp_params->ptp_global_time,
-                            start_edge);
+                            0);
                         ptp_params->network_set_start_ptp = true;
                         g_stream_mode = false;
                     }
@@ -589,14 +536,9 @@ int main(int argc, char **args) {
                         ptp_params->ptp_global_time =
                             ((unsigned long long)delay_in_second) * 1000000000 +
                             ptp_time;
-                        uint64_t start_edge = 0;
-                        if (lj_trigger.running()) {
-                            start_edge = lj_trigger.edge_counter() + 10;
-                            camera_control->lj_start_edge = start_edge;
-                        }
                         host_broadcast_start_stream(
                             fb_builder, &server, ptp_params->ptp_global_time,
-                            start_edge);
+                            0);
                         ptp_params->network_set_start_ptp = true;
                         g_stream_mode = true;
                     }
