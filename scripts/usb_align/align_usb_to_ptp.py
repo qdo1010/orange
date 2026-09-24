@@ -36,8 +36,25 @@ def load_meta(path, columns):
         rows = list(csv.DictReader(f))
     if not rows:
         return {c: np.array([], dtype=np.int64) for c in columns}
-    return {c: np.array([int(r[c]) for r in rows], dtype=np.int64)
+    # The raw16 metadata suffixes its timestamp columns with _ns.
+    key = {c: c if c in rows[0] else c + "_ns" for c in columns}
+    return {c: np.array([int(r[key[c]]) for r in rows], dtype=np.int64)
             for c in columns}
+
+
+def drop_stale_usb_frames(usb):
+    """Drop frames that sat queued in the driver before recording started.
+
+    The stream runs from camera open, so the first dequeues at record start
+    return old buffers: their timestamp_sys is the dequeue time, not the
+    arrival time. timestamp_mono (driver stamp) exposes them: timestamp_sys -
+    timestamp_mono is constant for live frames and much larger for stale ones.
+    """
+    if "timestamp_mono" not in usb or not len(usb["frame_id"]):
+        return usb, 0
+    lag = usb["timestamp_sys"] - usb["timestamp_mono"]
+    live = lag - np.median(lag) < 5_000_000  # 5 ms
+    return {c: v[live] for c, v in usb.items()}, int((~live).sum())
 
 
 def find_cameras(folder, usb_serial):
@@ -98,7 +115,9 @@ def main():
         header = f.readline().strip().split(",")
     if "v4l2_sequence" in header:
         usb_cols.append("v4l2_sequence")
-    usb = load_meta(usb_path, usb_cols)
+    if "timestamp_mono_ns" in header:
+        usb_cols.append("timestamp_mono")
+    usb, n_stale = drop_stale_usb_frames(load_meta(usb_path, usb_cols))
 
     emergent = {s: load_meta(p, ["frame_id", "timestamp", "timestamp_sys"])
                 for s, p in emergent_paths.items()}
@@ -106,9 +125,20 @@ def main():
     if not emergent:
         sys.exit("Emergent metadata files are empty")
 
-    # One fit over all Emergent frames: their PTP clocks are common.
-    all_ptp = np.concatenate([m["timestamp"] for m in emergent.values()])
-    all_sys = np.concatenate([m["timestamp_sys"] for m in emergent.values()])
+    # A camera whose host pipeline falls behind has a growing
+    # timestamp_sys - timestamp; its PTP stamps are still valid for matching,
+    # but its host times would skew the fit, so leave it out of the fit.
+    # Healthy cameras still have brief latency spikes, hence the median.
+    def lag_spread_ms(m):
+        lag = (m["timestamp_sys"] - m["timestamp"]).astype(np.float64)
+        return (np.median(lag) - lag.min()) / 1e6
+    fit_cams = [s for s, m in emergent.items() if lag_spread_ms(m) < 5.0]
+    if not fit_cams:
+        sys.exit("every Emergent camera fell behind; no host-clock reference")
+
+    # One fit over the Emergent frames: their PTP clocks are common.
+    all_ptp = np.concatenate([emergent[s]["timestamp"] for s in fit_cams])
+    all_sys = np.concatenate([emergent[s]["timestamp_sys"] for s in fit_cams])
     order = np.argsort(all_ptp)
     a, b, ptp0, sys0, resid = fit_host_vs_ptp(all_ptp[order], all_sys[order])
 
@@ -164,7 +194,8 @@ def main():
     # Summary
     ppm = (a - 1.0) * 1e6
     print(f"USB camera {usb_serial}: {len(usb['frame_id'])} frames "
-          f"({os.path.basename(usb_path)})")
+          f"({os.path.basename(usb_path)}), {n_stale} stale queued frames "
+          "dropped")
     if len(usb_dt):
         print(f"  period median {period_ms:.3f} ms ({1000 / period_ms:.3f} fps)"
               f", max gap {usb_dt.max():.1f} ms")
@@ -172,6 +203,10 @@ def main():
         gaps = np.diff(usb["v4l2_sequence"]) - 1
         print(f"  V4L2 sequence gaps: {int(gaps[gaps > 0].sum())} missing "
               "frames")
+    skipped = sorted(set(emergent) - set(fit_cams))
+    if skipped:
+        print(f"left out of the fit (host pipeline fell behind): "
+              f"{', '.join('Cam' + s for s in skipped)}")
     print(f"host-vs-PTP fit over {len(all_ptp)} Emergent frames: "
           f"drift {ppm:+.2f} ppm, host arrival latency above envelope: "
           f"median {np.median(resid) / 1e6:.3f} ms, "
